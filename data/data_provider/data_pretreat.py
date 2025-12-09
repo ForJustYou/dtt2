@@ -182,7 +182,7 @@ def reorder_features(
         'cost_time': end_time - start_time,
         })
 
-    print("重新排后的顺序:{}共耗时{}", perm, end_time - start_time)
+    print("重新排后的顺序:{}共耗时{}s", perm, end_time - start_time)
 
     perm_np = perm.cpu().numpy()
     mid_perm = perm_np[:-1]                      # 中间特征的新顺序（在 val_cols 的索引）
