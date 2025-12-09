@@ -1,0 +1,35 @@
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+.conda/
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Logs and run artifacts
+logs/
+checkpoints/
+*.log
+*.pth
+*.pt
+
+# Test / tooling caches
+.pytest_cache/
+.cache/
+
+# IDE / editor settings
+.vscode/
+.idea/
+
+# OS metadata
+.DS_Store
+Thumbs.db
