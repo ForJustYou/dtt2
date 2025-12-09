@@ -27,6 +27,9 @@ checkpoints/
 # Test / tooling caches
 .pytest_cache/
 .cache/
+results/
+*.npy
+result.txt
 
 # IDE / editor settings
 .vscode/
