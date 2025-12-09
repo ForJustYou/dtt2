@@ -8,6 +8,8 @@ venv/
 env/
 .env
 .conda/
+*.sh
+*.bat
 
 # Packaging / build artifacts
 build/
