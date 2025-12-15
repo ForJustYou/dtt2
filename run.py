@@ -16,7 +16,7 @@ if __name__ == '__main__':
     parser.add_argument('--is_training', type=int, default=1, help='status')
     parser.add_argument('--model_id', type=str, default='test', help='model id')
     parser.add_argument('--model', type=str, default='DeformTime',
-                        help='model name, options: [DLinear, LightTS, PatchTST, Crossformer, iTransformer, DeformTime]')
+                        help='model name, options: [DLinear, LightTS, PatchTST, Crossformer, iTransformer, DeformTime,DeformPQ]')
 
     # data loader
     parser.add_argument('--data', type=str, default='ETTh1', help='dataset type')
