@@ -409,7 +409,7 @@ class Dataset_SHEERM(Dataset):
         seq_x_mark = self.data_stamp[s_begin:s_end]
         seq_y_mark = self.data_stamp[r_begin:r_end]
 
-        cycle_index = torch.tensor(self.cycle_index[s_end])
+        cycle_index = torch.tensor(self.cycle_index[s_end],dtype=torch.long)
 
         return seq_x, seq_y, seq_x_mark, seq_y_mark,cycle_index
 

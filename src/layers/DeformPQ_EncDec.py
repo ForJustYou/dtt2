@@ -192,7 +192,6 @@ class DeformAtten2D(nn.Module):
         B, H, W, C = x.shape
         x = x.permute(0, 3, 1, 2) # B, C, H, W
         #416 1 7 64
-        cycle_index = cycle_index.long()
         gather_index = (cycle_index.view(-1, 1) + torch.arange(self.patch_len, device=cycle_index.device).view(1, -1)) % self.cycle
         query_input = self.temporalQuery[gather_index]  # (b, c, s)
         query = query_input.unfold(dimension=-2, size=self.patch_len, step=self.stride)
@@ -298,7 +297,11 @@ class CrossDeformAttn(nn.Module):
     def forward(self, x, attn_mask=None, tau=None, delta=None, cycle_index=None):
         n_day = self.n_days 
         B, L, C = x.shape
-        cycle_index_expanded = cycle_index.unsqueeze(1).repeat(1, self.num_patches).reshape(-1)  # 形状变成 [B*num_patches]
+
+        offsets = torch.arange(self.num_patches, device=cycle_index.device) * self.stride   # (N,)
+        cycle_index_patch = (cycle_index[:, None] + offsets[None, :]) % self.n_days # (B, N)
+        cycle_index_flat = cycle_index_patch.reshape(-1)  # (B*N,)
+
         x = self.layer_norm(x)
         padding_len = (n_day - (L % n_day)) % n_day
         x_padded = torch.cat((x, x[:, [0], :].expand(-1, padding_len, -1)), dim=1)
@@ -318,7 +321,7 @@ class CrossDeformAttn(nn.Module):
 
         for d, attn_layer in enumerate(self.attn_layers2d):
             x0 = x_2d
-            x_2d = attn_layer(x_2d,cycle_index_expanded)
+            x_2d = attn_layer(x_2d,cycle_index_flat)
             x_2d = self.drop_path2d[d](x_2d) + x0
             x0 = x_2d
             x_2d = self.mlps2d[d](self.layer_norm(x_2d.permute(0,1,3,2))).permute(0,1,3,2)
