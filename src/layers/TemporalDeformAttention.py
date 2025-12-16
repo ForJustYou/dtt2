@@ -333,6 +333,8 @@ class DeformAtten2D(nn.Module):
             vgrid = grid + offset
             vgrid_scaled = normalize_grid(vgrid)
             # the backward of F.grid_sample is non-deterministic
+            # x torch.Size([416, 1, 7, 64])
+            # vgrid_scaled torch.Size([416, 8, 65, 2])
             x_sampled = F.grid_sample(
                 x,
                 vgrid_scaled,

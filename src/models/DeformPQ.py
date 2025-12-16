@@ -75,7 +75,7 @@ class Model(nn.Module):
         # Projection layer
         self.projection = nn.Linear(self.d_model, self.f_dim)
 
-    def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
+    def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec,cycle_index):
         assert x_enc.shape[-1] == self.f_dim
 
         # Series Stationarization adopted from NSformer, optional
@@ -88,7 +88,7 @@ class Model(nn.Module):
         x_enc = self.pre_norm(x_enc)
 
         # Deformed attention
-        enc_out, _ = self.encoder(x_enc) 
+        enc_out, _ = self.encoder(x_enc,cycle_index=cycle_index) 
 
         # Decoder
         h0 = torch.zeros(self.d_layers, x_enc.size(0), self.d_model).requires_grad_().to(x_enc.device)
@@ -101,34 +101,6 @@ class Model(nn.Module):
 
         return out
     
-    def forward(self, x_enc, x_mark_enc=None, x_dec=None, x_mark_dec=None, mask=None):
-        dec_out = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec)
+    def forward(self, x_enc, x_mark_enc=None, x_dec=None, x_mark_dec=None, cycle_index=None):
+        dec_out = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec, cycle_index=cycle_index)
         return dec_out[:, -self.pred_len:, :]
-
-    def __init__(self, d_inp, d_model, padding, sub_groups=8, dropout=0.1):
-        super(Local_Temporal_Embedding, self).__init__()
-
-        d_out = d_model // sub_groups if d_model % sub_groups == 0 else d_model // sub_groups + 1
-        self.sub_seqlen = d_inp
-        self.padding_patch_layer = nn.ReplicationPad1d((0, padding))
-        self.value_embedding = nn.Linear(d_inp, d_out, bias=False)
-                
-        self.position_embedding = PositionalEmbedding(d_model)
-        self.dropout = nn.Dropout(p=dropout)
-        self.d_model = d_model
-
-    def forward(self, x):
-        # The in_channel is still fully conv with the out channel
-        # the number of output channels (out_channels) determines 
-        # the number of filters applied to the input, and each filter 
-        # processes the input across all input channels
-        B, L, C = x.shape
-        x = self.padding_patch_layer(x)
-        x = x.unfold(dimension=-1, size=self.sub_seqlen, step=self.sub_seqlen)
-        x = rearrange(x, 'b l g c -> (b g) l c')
-        # x = x.permute(0, 2, 1)
-        x = self.value_embedding(x)
-        # .permute(0, 2, 1)
-        x = rearrange(x, '(b g) l c -> b l (g c)', b = B)[:,:,:self.d_model]
-        x = x + self.position_embedding(x)
-        return self.dropout(x)

@@ -14,11 +14,11 @@ class Encoder(nn.Module):
         self.attn_layers = nn.ModuleList(attn_layers)
         self.norm = norm_layer
 
-    def forward(self, x, attn_mask=None, tau=None, delta=None):
+    def forward(self, x, attn_mask=None, tau=None, delta=None, cycle_index=None):
         # x [B, L, D]
         attns = []
         for attn_layer in self.attn_layers:
-            x, attn = attn_layer(x, attn_mask=attn_mask, tau=tau, delta=delta)
+            x, attn = attn_layer(x, attn_mask=attn_mask, tau=tau, delta=delta, cycle_index=cycle_index)
             attns.append(attn)
 
         if self.norm is not None:
@@ -67,10 +67,9 @@ class DeformAtten1D(nn.Module):
     '''
         max_offset (int): The maximum magnitude of the offset residue. Default: 14.
     '''
-    def __init__(self, seq_len, d_model, n_heads, dropout, kernel=5, n_groups=4, no_off=False, rpb=True) -> None:
+    def __init__(self, seq_len, d_model, n_heads, dropout, kernel=5, n_groups=4) -> None:
         super().__init__()
         self.offset_range_factor = kernel
-        self.no_off = no_off
         self.seq_len = seq_len
         self.d_model = d_model 
         self.n_groups = n_groups
@@ -79,7 +78,6 @@ class DeformAtten1D(nn.Module):
         self.n_head_channels = self.d_model // self.n_heads
         self.n_group_heads = self.n_heads // self.n_groups
         self.scale = self.n_head_channels ** -0.5
-        self.rpb = rpb
 
         self.proj_q = nn.Conv1d(self.d_model, self.d_model, kernel_size=1, stride=1, padding=0)
         self.proj_k = nn.Conv1d(self.d_model, self.d_model, kernel_size=1, stride=1, padding=0)
@@ -95,10 +93,8 @@ class DeformAtten1D(nn.Module):
 
         self.scale_factor = self.d_model ** -0.5  # 1/np.sqrt(dim)
 
-        if self.rpb:
-            self.relative_position_bias_table = nn.Parameter(
-                torch.zeros(1, self.d_model, self.seq_len))
-            trunc_normal_(self.relative_position_bias_table, std=.02)
+        self.relative_position_bias_table = nn.Parameter(torch.zeros(1, self.d_model, self.seq_len))
+        trunc_normal_(self.relative_position_bias_table, std=.02)
 
     def forward(self, x, mask=None):
         B, L, C = x.shape
@@ -125,30 +121,20 @@ class DeformAtten1D(nn.Module):
             n = arange.shape[-1]
             return 2.0 * arange / max(n - 1, 1) - 1.0
 
-        if self.offset_range_factor >= 0 and not self.no_off:
+        if self.offset_range_factor >= 0:
             offset = offset.tanh().mul(self.offset_range_factor)
 
-        if self.no_off:
-            x_sampled = F.avg_pool1d(x, kernel_size=self.stride, stride=self.stride)
-        else:
-            grid = torch.arange(offset.shape[-1], device = device)
-            vgrid = grid + offset
-            vgrid_scaled = normalize_grid(vgrid)
-
-            x_sampled = grid_sample_1d(
-                group(x),
-                vgrid_scaled,
+        grid = torch.arange(offset.shape[-1], device = device)
+        vgrid = grid + offset
+        vgrid_scaled = normalize_grid(vgrid)
+        x_sampled = grid_sample_1d(group(x),vgrid_scaled,
             mode = 'bilinear', padding_mode = 'zeros', align_corners = False)[:,:,:L]
-            
-        if not self.no_off:
-            x_sampled = rearrange(x_sampled,'(b g) d n -> b (g d) n', g = self.n_groups)
+
+        x_sampled = rearrange(x_sampled,'(b g) d n -> b (g d) n', g = self.n_groups)
         q = q.reshape(B * self.n_heads, self.n_head_channels, L)
         k = self.proj_k(x_sampled).reshape(B * self.n_heads, self.n_head_channels, L)
-        if self.rpb:
-            v = self.proj_v(x_sampled)
-            v = (v + self.relative_position_bias_table).reshape(B * self.n_heads, self.n_head_channels, L)
-        else:
-            v = self.proj_v(x_sampled).reshape(B * self.n_heads, self.n_head_channels, L)
+        v = self.proj_v(x_sampled)
+        v = (v + self.relative_position_bias_table).reshape(B * self.n_heads, self.n_head_channels, L)
 
         scaled_dot_prod = torch.einsum('b i d , b j d -> b i j', q, k) * self.scale_factor
 
@@ -167,50 +153,55 @@ class DeformAtten2D(nn.Module):
     '''
         max_offset (int): The maximum magnitude of the offset residue. Default: 14.
     '''
-    def __init__(self, seq_len, d_model, n_heads, dropout, kernel=5, n_groups=4, no_off=False, rpb=True) -> None:
+    def __init__(self, patch_len, d_route, n_heads, kernel=5, n_groups=4,d_model=None,stride = 1,seq_len = 1) -> None:
         super().__init__()
         self.offset_range_factor = kernel
-        self.no_off = no_off
-        self.f_sample = False
+        self.d_model = d_model
         self.seq_len = seq_len
-        self.d_model = d_model # (512)
+        self.stride = stride
+        self.patch_len = patch_len
+        self.d_route = d_route #1
         self.n_groups = n_groups
-        self.n_group_channels = self.d_model // self.n_groups
+        self.n_group_channels = self.d_route // self.n_groups
         self.n_heads = n_heads
-        self.n_head_channels = self.d_model // self.n_heads
+        self.n_head_channels = self.d_route // self.n_heads
         self.n_group_heads = self.n_heads // self.n_groups
         self.scale = self.n_head_channels ** -0.5
-        self.rpb = rpb
+        self.cycle = 168
 
-        self.proj_q = nn.Conv2d(self.d_model, self.d_model, kernel_size=1, stride=1, padding=0)
-        self.proj_k = nn.Conv2d(self.d_model, self.d_model, kernel_size=1, stride=1, padding=0)
-        self.proj_v = nn.Conv2d(self.d_model, self.d_model, kernel_size=1, stride=1, padding=0)
-        self.proj_out = nn.Linear(self.d_model, self.d_model)
+        self.temporalQuery = torch.nn.Parameter(torch.zeros(self.cycle, self.d_model), requires_grad=True)
+
+        self.proj_q = nn.Conv2d(self.d_route, self.d_route, kernel_size=1, stride=1, padding=0)
+        self.proj_k = nn.Conv2d(self.d_route, self.d_route, kernel_size=1, stride=1, padding=0)
+        self.proj_v = nn.Conv2d(self.d_route, self.d_route, kernel_size=1, stride=1, padding=0)
+        self.proj_out = nn.Linear(self.d_route, self.d_route)
         kernel_size = kernel
-        self.stride = 1
-        pad_size = kernel_size // 2 if kernel_size != self.stride else 0
+        self.step = 1
+        pad_size = kernel_size // 2 if kernel_size != self.step else 0
         self.proj_offset = nn.Sequential( 
-            nn.Conv2d(self.n_group_channels, self.n_group_channels, kernel_size=kernel_size, stride=self.stride, padding=pad_size),
+            nn.Conv2d(self.n_group_channels, self.n_group_channels, kernel_size=kernel_size, stride=self.step, padding=pad_size),
             nn.Conv2d(self.n_group_channels, 2, kernel_size=1, stride=1, padding=0, bias=False)
         )
 
-        self.scale_factor = self.d_model ** -0.5  # 1/np.sqrt(dim)
-
-        if self.rpb:
-            self.relative_position_bias_table = nn.Parameter(
-                torch.zeros(1, self.d_model, self.seq_len, 1))
-            trunc_normal_(self.relative_position_bias_table, std=.02)
+        self.scale_factor = self.d_route ** -0.5  # 1/np.sqrt(dim)
+        self.relative_position_bias_table = nn.Parameter(torch.zeros(1, self.d_route, self.patch_len, 1))
+        trunc_normal_(self.relative_position_bias_table, std=.02)
 
 
-    def forward(self, x, mask=None):
+    def forward(self, x, cycle_index):
         B, H, W, C = x.shape
         x = x.permute(0, 3, 1, 2) # B, C, H, W
-
-        q = self.proj_q(x) # B, 1, H, W
+        #416 1 7 64
+        cycle_index = cycle_index.long()
+        gather_index = (cycle_index.view(-1, 1) + torch.arange(self.patch_len, device=cycle_index.device).view(1, -1)) % self.cycle
+        query_input = self.temporalQuery[gather_index]  # (b, c, s)
+        query = query_input.unfold(dimension=-2, size=self.patch_len, step=self.stride)
+        query = rearrange(query, 'b n c l -> (b n) l c').unsqueeze(-3)
+        q = self.proj_q(query) # B, 1, H, W
 
         offset = self.proj_offset(q) # B, 2, H, W
 
-        if self.offset_range_factor >= 0 and not self.no_off:
+        if self.offset_range_factor >= 0:
             offset = offset.tanh().mul(self.offset_range_factor)
 
         def create_grid_like(t, dim = 0):
@@ -235,36 +226,19 @@ class DeformAtten2D(nn.Module):
 
             return torch.stack((grid_h, grid_w), dim = out_dim)
 
-        if self.no_off:
-            x_sampled = F.avg_pool2d(x, kernel_size=self.stride, stride=self.stride)
-        else:
-            grid =create_grid_like(offset)
-            vgrid = grid + offset
-            vgrid_scaled = normalize_grid(vgrid)
-            # the backward of F.grid_sample is non-deterministic
-            x_sampled = F.grid_sample(
-                x,
-                vgrid_scaled,
-            mode = 'bilinear', padding_mode = 'zeros', align_corners = False)[:,:,:H,:W]
-              
-        if not self.no_off:
-            x_sampled = rearrange(x_sampled, '(b g) c h w -> b (g c) h w', g=self.n_groups)
-        q = q.reshape(B * self.n_heads, H, W)
+     
+        grid =create_grid_like(offset)
+        vgrid = grid + offset
+        vgrid_scaled = normalize_grid(vgrid)
+        x_sampled = F.grid_sample(x,vgrid_scaled,
+        mode = 'bilinear', padding_mode = 'zeros', align_corners = False)[:,:,:H,:W]
+        x_sampled = rearrange(x_sampled, '(b g) c h w -> b (g c) h w', g=self.n_groups)
         k = self.proj_k(x_sampled).reshape(B * self.n_heads, H, W)
-        if self.rpb:
-            v = self.proj_v(x_sampled)
-            v = (v + self.relative_position_bias_table).reshape(B * self.n_heads, H, W)
-        else:
-            v = self.proj_v(x_sampled).reshape(B * self.n_heads, H, W)
-
+        v = self.proj_v(x_sampled)
+        v = (v + self.relative_position_bias_table).reshape(B * self.n_heads, H, W)
+        q = q.reshape(B * self.n_heads, H, W)
         scaled_dot_prod = torch.einsum('b i d , b j d -> b i j', q, k) * self.scale_factor
-
-        if mask is not None:
-            assert mask.shape == scaled_dot_prod.shape[1:]
-            scaled_dot_prod = scaled_dot_prod.masked_fill(mask, -np.inf)
-
         attention = torch.softmax(scaled_dot_prod, dim=-1)
-
         out = torch.einsum('b i j , b j d -> b i d', attention, v)
         
         return self.proj_out(out.reshape(B, H, W, C))
@@ -272,7 +246,7 @@ class DeformAtten2D(nn.Module):
 
 class CrossDeformAttn(nn.Module):
     def __init__(self, seq_len, d_model, n_heads, dropout, droprate, 
-                 n_days=1, window_size=4, patch_len=7, stride=3, no_off=False) -> None:
+                 n_days=1, window_size=4, patch_len=7, stride=3) -> None:
         super().__init__()
         self.n_days = n_days
         self.seq_len = seq_len
@@ -286,10 +260,8 @@ class CrossDeformAttn(nn.Module):
         self.layer_norm =  nn.LayerNorm(d_model)
 
         # 1D
-        self.ff1 = nn.Linear(d_model, d_model, bias=True)
-        self.ff2 = nn.Linear(self.subseq_len, self.subseq_len, bias=True)
         # Deform attention
-        self.deform_attn = DeformAtten1D(self.subseq_len, d_model, n_heads, dropout, kernel=window_size, no_off=no_off) 
+        self.deform_attn = DeformAtten1D(self.subseq_len, d_model, n_heads, dropout, kernel=window_size) 
         self.attn_layers1d = nn.ModuleList([self.deform_attn])
 
         self.mlps1d = nn.ModuleList(
@@ -305,9 +277,7 @@ class CrossDeformAttn(nn.Module):
         #######################################
         # 2D
         d_route = 1
-        self.conv_in = nn.Conv2d(1, d_route, kernel_size=1, bias=True)
-        self.conv_out = nn.Conv2d(d_route, 1, kernel_size=1, bias=True)
-        self.deform_attn2d = DeformAtten2D(self.patch_len, d_route, n_heads=1, dropout=dropout, kernel=window_size, n_groups=1, no_off=no_off)
+        self.deform_attn2d = DeformAtten2D(self.patch_len, d_route, n_heads=1, kernel=window_size, n_groups=1,d_model=d_model,seq_len=seq_len,stride=stride)
         self.write_out = nn.Linear(self.num_patches*self.patch_len, self.seq_len)
 
         self.attn_layers2d = nn.ModuleList([self.deform_attn2d])
@@ -325,12 +295,11 @@ class CrossDeformAttn(nn.Module):
 
         self.fc = nn.Linear(2*d_model, d_model)
         
-    def forward(self, x, attn_mask=None, tau=None, delta=None):
+    def forward(self, x, attn_mask=None, tau=None, delta=None, cycle_index=None):
         n_day = self.n_days 
         B, L, C = x.shape
-
+        cycle_index_expanded = cycle_index.unsqueeze(1).repeat(1, self.num_patches).reshape(-1)  # 形状变成 [B*num_patches]
         x = self.layer_norm(x)
-
         padding_len = (n_day - (L % n_day)) % n_day
         x_padded = torch.cat((x, x[:, [0], :].expand(-1, padding_len, -1)), dim=1)
         x_1d = rearrange(x_padded, 'b (seg_num ts_d) d_model -> (b ts_d) seg_num d_model', ts_d=n_day) 
@@ -346,9 +315,10 @@ class CrossDeformAttn(nn.Module):
         x_unfold = x.unfold(dimension=-2, size=self.patch_len, step=self.stride)
         x_2d = rearrange(x_unfold, 'b n c l -> (b n) l c').unsqueeze(-3)
         x_2d = rearrange(x_2d, 'b c h w -> b h w c')
+
         for d, attn_layer in enumerate(self.attn_layers2d):
             x0 = x_2d
-            x_2d = attn_layer(x_2d)
+            x_2d = attn_layer(x_2d,cycle_index_expanded)
             x_2d = self.drop_path2d[d](x_2d) + x0
             x0 = x_2d
             x_2d = self.mlps2d[d](self.layer_norm(x_2d.permute(0,1,3,2))).permute(0,1,3,2)
@@ -359,7 +329,6 @@ class CrossDeformAttn(nn.Module):
 
         x = torch.concat([x_1d, x_2d], dim=-1)
         x = self.fc(x)
-
         return x, None
     
 class PositionalEmbedding(nn.Module):
@@ -381,7 +350,6 @@ class PositionalEmbedding(nn.Module):
     def forward(self, x):
         return self.pe[:, :x.size(1)]
 
-    
 class Deform_Temporal_Embedding(nn.Module):
     def __init__(self, d_inp, d_model, embed_type='fixed', freq='h', dropout=0.1):
         super(Deform_Temporal_Embedding, self).__init__()

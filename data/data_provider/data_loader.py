@@ -7,6 +7,7 @@ from sklearn.preprocessing import StandardScaler
 from data.data_provider import data_pretreat
 from src.utils.timefeatures import time_features
 import warnings
+import torch
 
 warnings.filterwarnings('ignore')
 
@@ -335,7 +336,7 @@ class Dataset_SHEERM(Dataset):
         assert flag in ['train', 'test', 'val']
         type_map = {'train': 0, 'val': 1, 'test': 2}
         self.set_type = type_map[flag]
-
+        self.cycle = 168  # weekly cycle for 15-min data
         self.features = features
         self.target = target
         self.scale = scale
@@ -395,6 +396,8 @@ class Dataset_SHEERM(Dataset):
         self.data_y = data[border1:border2]
         self.data_stamp = data_stamp
 
+        self.cycle_index = (np.arange(len(data)) % self.cycle)[border1:border2]
+
     def __getitem__(self, index):
         s_begin = index
         s_end = s_begin + self.seq_len
@@ -406,7 +409,9 @@ class Dataset_SHEERM(Dataset):
         seq_x_mark = self.data_stamp[s_begin:s_end]
         seq_y_mark = self.data_stamp[r_begin:r_end]
 
-        return seq_x, seq_y, seq_x_mark, seq_y_mark
+        cycle_index = torch.tensor(self.cycle_index[s_end])
+
+        return seq_x, seq_y, seq_x_mark, seq_y_mark,cycle_index
 
     def __len__(self):
         return len(self.data_x) - self.seq_len - self.pred_len + 1
