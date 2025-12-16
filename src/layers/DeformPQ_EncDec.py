@@ -192,6 +192,7 @@ class DeformAtten2D(nn.Module):
         B, H, W, C = x.shape
         x = x.permute(0, 3, 1, 2) # B, C, H, W
         #416 1 7 64
+        cycle_index = cycle_index.long()
         gather_index = (cycle_index.view(-1, 1) + torch.arange(self.patch_len, device=cycle_index.device).view(1, -1)) % self.cycle
         query_input = self.temporalQuery[gather_index]  # (b, c, s)
         query = query_input.unfold(dimension=-2, size=self.patch_len, step=self.stride)
