@@ -196,6 +196,8 @@ class Dataset_ETT_minute(Dataset):
         self.data_y = data[border1:border2]
         self.data_stamp = data_stamp
 
+        self.cycle_index = (np.arange(len(data)) % self.cycle)[border1:border2]
+
     def __getitem__(self, index):
         s_begin = index
         s_end = s_begin + self.seq_len
@@ -207,7 +209,9 @@ class Dataset_ETT_minute(Dataset):
         seq_x_mark = self.data_stamp[s_begin:s_end]
         seq_y_mark = self.data_stamp[r_begin:r_end]
 
-        return seq_x, seq_y, seq_x_mark, seq_y_mark
+        cycle_index = torch.tensor(self.cycle_index[s_end],dtype=torch.long)
+
+        return seq_x, seq_y, seq_x_mark, seq_y_mark,cycle_index
 
     def __len__(self):
         return len(self.data_x) - self.seq_len - self.pred_len + 1
