@@ -18,7 +18,16 @@ warnings.filterwarnings('ignore')
 class exp_MTS_forecasting(Exp_Basic):
     def __init__(self, args):
         super(exp_MTS_forecasting, self).__init__(args)
-        log.init_csv_logger(self.args.model,self.args.data_path )
+        data_name = getattr(self.args, "data", None)
+        if not data_name:
+            data_path = getattr(self.args, "data_path", "")
+            data_name = os.path.splitext(os.path.basename(str(data_path)))[0] or "data"
+        log.init_csv_logger(
+            self.args.model,
+            data_name,
+            params=vars(self.args),
+            data_subdir=data_name,
+        )
         self.logger = log.Logger
 
     def _build_model(self):
@@ -161,12 +170,13 @@ class exp_MTS_forecasting(Exp_Basic):
                     print('\tspeed: {:.4f}s/iter; left time: {:.4f}s'.format(speed, left_time))
                     iter_count = 0
                     time_now = time.time()
-                    #记录日志
-                    self.logger.log({
-                        'iter': i + 1,
-                        'train_loss': round(loss.item(),3),
-                        'speed': round(speed,2),
-                    })
+                    if (i + 1) % 1000 == 0:
+                         #记录日志
+                        self.logger.log({
+                            'iter': i + 1,
+                            'train_loss': round(loss.item(),3),
+                            'speed': round(speed,2),
+                        })   
 
                 if self.args.use_amp:
                     scaler.scale(loss).backward()
