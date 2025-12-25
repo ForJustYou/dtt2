@@ -34,7 +34,8 @@ if __name__ == '__main__':
     parser.add_argument('--label_len', type=int, default=48, help='start token length')
     parser.add_argument('--pred_len', type=int, default=96, help='prediction sequence length')
     parser.add_argument('--seasonal_patterns', type=str, default='Monthly', help='subset for M4')
-    parser.add_argument('--pretreatment', type=int, default=1, help='pretreatment')
+    parser.add_argument('--pretreatment', type=int, default=0, help='pretreatment')
+    parser.add_argument('--cycle', type=int, default=168, help='cycle length ')
     parser.add_argument('--inverse', action='store_true', help='inverse output data', default=False)
 
     # model define

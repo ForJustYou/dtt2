@@ -27,6 +27,7 @@ PARAM_FILTER = [
     "layer_dropout",
     "batch_size",
     "learning_rate",
+    "cycle",
 ]
 
 DEFAULT_FIELDS = [

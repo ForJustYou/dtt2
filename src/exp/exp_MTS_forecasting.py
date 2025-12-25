@@ -18,7 +18,7 @@ warnings.filterwarnings('ignore')
 class exp_MTS_forecasting(Exp_Basic):
     def __init__(self, args):
         super(exp_MTS_forecasting, self).__init__(args)
-        data_name = getattr(self.args, "data", None)
+        data_name = getattr(self.args, "data_path", None)
         if not data_name:
             data_path = getattr(self.args, "data_path", "")
             data_name = os.path.splitext(os.path.basename(str(data_path)))[0] or "data"

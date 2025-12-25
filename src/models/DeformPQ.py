@@ -55,7 +55,9 @@ class Model(nn.Module):
                                 n_days=n_days[l], 
                                 window_size=configs.kernel, 
                                 patch_len=configs.patch_len, 
-                                stride=configs.stride) for l in range(configs.e_layers)
+                                stride=configs.stride,
+                                cycle=configs.cycle
+                                ) for l in range(configs.e_layers)
             ],
             norm_layer=Layernorm(configs.d_model)
         )

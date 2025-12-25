@@ -1,4 +1,4 @@
-from data.data_provider.data_loader import Dataset_ETT_hour, Dataset_ETT_minute, Dataset_Custom, Dataset_SHEERM
+from data.data_provider.data_loader import Dataset_ETT_hour, Dataset_ETT_minute, Dataset_Custom, Dataset_SHEERM,Dataset_PSHE
 from torch.utils.data import DataLoader
 
 data_dict = {
@@ -8,6 +8,7 @@ data_dict = {
     'ETTm2': Dataset_ETT_minute,
     'custom': Dataset_Custom,
     'SHEERM': Dataset_SHEERM,
+    'PSHE': Dataset_PSHE,
 }
 
 
@@ -36,9 +37,11 @@ def data_provider(args, flag):
         timeenc=timeenc,
         freq=freq,
         seasonal_patterns=args.seasonal_patterns,
+        cycle=args.cycle,
     )
-    if args.data == 'SHEERM':
+    if args.data == 'SHEERM' or args.data == 'PSHE':
         data_kwargs['pretreatment'] = args.pretreatment
+        data_kwargs['cycle'] = args.cycle
 
     data_set = Data(**data_kwargs)
     
