@@ -1,14 +1,10 @@
-from data.data_provider.data_loader import Dataset_ETT_hour, Dataset_ETT_minute, Dataset_Custom, Dataset_SHEERM,Dataset_PSHE
+from data.data_provider.data_loader import Dataset_SHEERM,Dataset_PSHE,Dataset_CityLearn
 from torch.utils.data import DataLoader
 
 data_dict = {
-    'ETTh1': Dataset_ETT_hour,
-    'ETTh2': Dataset_ETT_hour,
-    'ETTm1': Dataset_ETT_minute,
-    'ETTm2': Dataset_ETT_minute,
-    'custom': Dataset_Custom,
     'SHEERM': Dataset_SHEERM,
     'PSHE': Dataset_PSHE,
+    'CityLearn': Dataset_CityLearn,
 }
 
 
@@ -39,7 +35,7 @@ def data_provider(args, flag):
         seasonal_patterns=args.seasonal_patterns,
         cycle=args.cycle,
     )
-    if args.data == 'SHEERM' or args.data == 'PSHE':
+    if args.data == 'SHEERM' or args.data == 'PSHE' or args.data == 'CityLearn':
         data_kwargs['pretreatment'] = args.pretreatment
         data_kwargs['cycle'] = args.cycle
 
