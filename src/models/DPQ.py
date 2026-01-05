@@ -25,9 +25,6 @@ class Model(nn.Module):
         self.d_layers = configs.d_layers
         self.d_model = configs.d_model
         self.f_dim = configs.enc_in
-        self.c_out = configs.c_out
-        self.dropout = configs.dropout
-        self.kernel_size = configs.kernel
 
         # Embedding
         if configs.enc_in == 1:
@@ -49,8 +46,6 @@ class Model(nn.Module):
             [
                 CrossDeformAttn(seq_len=configs.seq_len, 
                                 d_model=configs.d_model, 
-                                n_heads=configs.n_heads, 
-                                dropout=configs.dropout, 
                                 droprate=dpr[l], 
                                 n_days=n_days[l], 
                                 window_size=configs.kernel, 

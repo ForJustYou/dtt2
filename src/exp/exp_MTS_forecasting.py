@@ -1,7 +1,7 @@
 from data.data_provider.data_factory import data_provider
 from src.exp.exp_basic import Exp_Basic
 from src.utils.tools import EarlyStopping, adjust_learning_rate
-from src.utils.metrics import MAE, MSE, SMAPE
+from src.utils.metrics import MAE, MSE, RMSE, MAPE, MSPE, SMAPE
 import torch
 import torch.nn as nn
 from torch import optim
@@ -52,9 +52,22 @@ class exp_MTS_forecasting(Exp_Basic):
             criterion = nn.MSELoss()
         return criterion
 
+    @staticmethod
+    def _calc_metrics(pred, true):
+        return {
+            "mae": MAE(pred, true),
+            "mse": MSE(pred, true),
+            "rmse": RMSE(pred, true),
+            "mape": MAPE(pred, true),
+            "mspe": MSPE(pred, true),
+            "smape": SMAPE(pred, true),
+        }
+
+
     def vali(self, vali_data, vali_loader, criterion):
         total_loss = []
-        train_mae = []
+        preds = []
+        trues = []
         self.model.eval()
         with torch.no_grad():
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark, cycle_index) in enumerate(vali_loader):
@@ -84,18 +97,19 @@ class exp_MTS_forecasting(Exp_Basic):
                 outputs = outputs[:, -self.args.pred_len:, f_dim:]
                 batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
 
-                pred = outputs.detach().cpu()
-                true = batch_y.detach().cpu()
-
-                loss = criterion(pred, true)
-                mae = criterion(pred[:,-1,-1], true[:,-1,-1])
-
-                total_loss.append(loss)
-                train_mae.append(mae)
+                loss = criterion(outputs, batch_y)
+                total_loss.append(loss.item())
+                preds.append(outputs.detach().cpu().numpy())
+                trues.append(batch_y.detach().cpu().numpy())
         total_loss = np.average(total_loss)
-        train_mae = np.average(train_mae)
+        preds = np.concatenate(preds, axis=0)
+        trues = np.concatenate(trues, axis=0)
+        target_pred = preds[:, -1, -1]
+        target_true = trues[:, -1, -1]
+        metrics = self._calc_metrics(target_pred, target_true)
         self.model.train()
-        return total_loss, train_mae
+        return total_loss, metrics
+
 
     def train(self, setting):
 
@@ -188,19 +202,35 @@ class exp_MTS_forecasting(Exp_Basic):
 
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
             train_loss = np.average(train_loss)
-            vali_loss, vali_mse = self.vali(vali_data, vali_loader, criterion)
-            test_loss, test_mse = self.vali(test_data, test_loader, criterion)
+            vali_loss, vali_metrics = self.vali(vali_data, vali_loader, criterion)
+            test_loss, test_metrics = self.vali(test_data, test_loader, criterion)
 
-            print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f} Vali MSE: {5:.7f} Test MSE: {6:.7f}".format(
-                epoch + 1, train_steps, train_loss, vali_loss, test_loss, vali_mse, test_mse))
-            #记录日志
+            print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}".format(
+                epoch + 1, train_steps, train_loss, vali_loss, test_loss))
+            print("Vali: MAE {0:.7f} MSE {1:.7f} RMSE {2:.7f} MAPE {3:.7f} MSPE {4:.7f} SMAPE {5:.7f}".format(
+                vali_metrics['mae'], vali_metrics['mse'], vali_metrics['rmse'],
+                vali_metrics['mape'], vali_metrics['mspe'], vali_metrics['smape']))
+            print("Test: MAE {0:.7f} MSE {1:.7f} RMSE {2:.7f} MAPE {3:.7f} MSPE {4:.7f} SMAPE {5:.7f}".format(
+                test_metrics['mae'], test_metrics['mse'], test_metrics['rmse'],
+                test_metrics['mape'], test_metrics['mspe'], test_metrics['smape']))
+            # log
             self.logger.log({
                 'epoch': epoch + 1,
                 'train_loss': train_loss,
                 'vali_loss': vali_loss,
                 'test_loss': test_loss,
-                'vali_mse': vali_mse,
-                'test_mse': test_mse,
+                'vali_mae': vali_metrics['mae'],
+                'vali_mse': vali_metrics['mse'],
+                'vali_rmse': vali_metrics['rmse'],
+                'vali_mape': vali_metrics['mape'],
+                'vali_mspe': vali_metrics['mspe'],
+                'vali_smape': vali_metrics['smape'],
+                'test_mae': test_metrics['mae'],
+                'test_mse': test_metrics['mse'],
+                'test_rmse': test_metrics['rmse'],
+                'test_mape': test_metrics['mape'],
+                'test_mspe': test_metrics['mspe'],
+                'test_smape': test_metrics['smape'],
                 'cost_time': round(time.time() - epoch_time,3),
                 'epoch_time': datetime.now().isoformat(timespec="seconds"),
             })
@@ -284,29 +314,31 @@ class exp_MTS_forecasting(Exp_Basic):
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
-        target_mae = MAE(preds[:,-1,-1], trues[:,-1,-1])
-        target_mse = MSE(preds[:,-1,-1], trues[:,-1,-1])
-        target_smape = SMAPE(preds[:,-1,-1], trues[:,-1,-1])
-        print("target mae:{}".format(target_mae))
-        print("target mse:{}".format(target_mse))
-        print("target smape:{}".format(target_smape))
+        target_pred = preds[:, -1, -1]
+        target_true = trues[:, -1, -1]
+        metrics = self._calc_metrics(target_pred, target_true)
+        print("target mae:{}".format(metrics['mae']))
+        print("target mse:{}".format(metrics['mse']))
+        print("target rmse:{}".format(metrics['rmse']))
+        print("target mape:{}".format(metrics['mape']))
+        print("target mspe:{}".format(metrics['mspe']))
+        print("target smape:{}".format(metrics['smape']))
 
         self.logger.log({
-            'epoch': 'mae',
-            'train_loss': round(target_mae,3),
-        })
-        self.logger.log({
-            'epoch': 'mse',
-            'train_loss': round(target_mse,3),
-        })
-        self.logger.log({
-            'epoch': 'smape',
-            'train_loss': round(target_smape,3),
+            'epoch': 'test',
+            'test_mae': metrics['mae'],
+            'test_mse': metrics['mse'],
+            'test_rmse': metrics['rmse'],
+            'test_mape': metrics['mape'],
+            'test_mspe': metrics['mspe'],
+            'test_smape': metrics['smape'],
         })
 
         f = open("result.txt", 'a')
         f.write(setting + "  \n")
-        f.write('mae:{}, smape:{}'.format(target_mae, target_smape))
+        f.write('mae:{}, mse:{}, rmse:{}, mape:{}, mspe:{}, smape:{}'.format(
+            metrics['mae'], metrics['mse'], metrics['rmse'],
+            metrics['mape'], metrics['mspe'], metrics['smape']))
         f.write('\n')
         f.write('\n')
         f.close()

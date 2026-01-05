@@ -1,6 +1,6 @@
 import os
 import torch
-from src.models import DLinear, LightTS, PatchTST, Crossformer, iTransformer, DeformTime, DeformPQ, DPQ
+from src.models import DLinear, LightTS, PatchTST, Crossformer, iTransformer, DeformTime, DeformPQ, DPQ, TQNet
 
 
 class Exp_Basic(object):
@@ -15,6 +15,7 @@ class Exp_Basic(object):
             'DeformTime': DeformTime,
             'DeformPQ': DeformPQ,
             'DPQ': DPQ,
+            'TQNet': TQNet
         }
         self.device = self._acquire_device()
         self.model = self._build_model().to(self.device)

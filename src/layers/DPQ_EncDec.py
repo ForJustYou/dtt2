@@ -63,101 +63,16 @@ class MLP(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-class DeformAtten1D(nn.Module):
-    '''
-        max_offset (int): The maximum magnitude of the offset residue. Default: 14.
-    '''
-    def __init__(self, seq_len, d_model, n_heads, dropout, kernel=5, n_groups=4) -> None:
-        super().__init__()
-        self.offset_range_factor = kernel
-        self.seq_len = seq_len
-        self.d_model = d_model 
-        self.n_groups = n_groups
-        self.n_group_channels = self.d_model // self.n_groups
-        self.n_heads = n_heads
-        self.n_head_channels = self.d_model // self.n_heads
-        self.n_group_heads = self.n_heads // self.n_groups
-        self.scale = self.n_head_channels ** -0.5
-
-        self.proj_q = nn.Conv1d(self.d_model, self.d_model, kernel_size=1, stride=1, padding=0)
-        self.proj_k = nn.Conv1d(self.d_model, self.d_model, kernel_size=1, stride=1, padding=0)
-        self.proj_v = nn.Conv1d(self.d_model, self.d_model, kernel_size=1, stride=1, padding=0)
-        self.proj_out = nn.Linear(self.d_model, self.d_model)
-        kernel_size = kernel
-        self.stride = 1
-        pad_size = kernel_size // 2 if kernel_size != self.stride else 0
-        self.proj_offset = nn.Sequential(
-            nn.Conv1d(self.n_group_channels, self.n_group_channels, kernel_size=kernel_size, stride=self.stride, padding=pad_size),
-            nn.Conv1d(self.n_group_channels, 1, kernel_size=1, stride=self.stride, padding=pad_size),
-        )
-
-        self.scale_factor = self.d_model ** -0.5  # 1/np.sqrt(dim)
-
-        self.relative_position_bias_table = nn.Parameter(torch.zeros(1, self.d_model, self.seq_len))
-        trunc_normal_(self.relative_position_bias_table, std=.02)
-
-    def forward(self, x, mask=None):
-        B, L, C = x.shape
-        dtype, device = x.dtype, x.device
-        x = x.permute(0,2,1) # B, C, L
-
-        q = self.proj_q(x) # B, C, L
-
-        group = lambda t: rearrange(t, 'b (g d) n -> (b g) d n', g = self.n_groups)
-
-        grouped_queries = group(q)
-
-        offset = self.proj_offset(grouped_queries) # B * g 1 Lg
-        offset = rearrange(offset, 'b 1 n -> b n')
-
-        def grid_sample_1d(feats, grid, *args, **kwargs):
-            grid = rearrange(grid, '... -> ... 1 1')
-            grid = F.pad(grid, (1, 0), value = 0.)
-            feats = rearrange(feats, '... -> ... 1')
-            out = F.grid_sample(feats, grid, **kwargs) 
-            return rearrange(out, '... 1 -> ...')
-        
-        def normalize_grid(arange, dim = 1, out_dim = -1):
-            n = arange.shape[-1]
-            return 2.0 * arange / max(n - 1, 1) - 1.0
-
-        if self.offset_range_factor >= 0:
-            offset = offset.tanh().mul(self.offset_range_factor)
-
-        grid = torch.arange(offset.shape[-1], device = device)
-        vgrid = grid + offset
-        vgrid_scaled = normalize_grid(vgrid)
-        x_sampled = grid_sample_1d(group(x),vgrid_scaled,
-            mode = 'bilinear', padding_mode = 'zeros', align_corners = False)[:,:,:L]
-
-        x_sampled = rearrange(x_sampled,'(b g) d n -> b (g d) n', g = self.n_groups)
-        q = q.reshape(B * self.n_heads, self.n_head_channels, L)
-        k = self.proj_k(x_sampled).reshape(B * self.n_heads, self.n_head_channels, L)
-        v = self.proj_v(x_sampled)
-        v = (v + self.relative_position_bias_table).reshape(B * self.n_heads, self.n_head_channels, L)
-
-        scaled_dot_prod = torch.einsum('b i d , b j d -> b i j', q, k) * self.scale_factor
-
-        if mask is not None:
-            assert mask.shape == scaled_dot_prod.shape[1:]
-            scaled_dot_prod = scaled_dot_prod.masked_fill(mask, -np.inf)
-
-        attention = torch.softmax(scaled_dot_prod, dim=-1) # softmax: attention[0,0,:].sum() = 1
-
-        out = torch.einsum('b i j , b j d -> b i d', attention, v) 
-        
-        return self.proj_out(rearrange(out, '(b g) l c -> b c (g l)', b=B))
-
 
 class DeformAtten2D(nn.Module):
     '''
         max_offset (int): The maximum magnitude of the offset residue. Default: 14.
     '''
-    def __init__(self, patch_len, d_route, n_heads, kernel=5, n_groups=4,d_model=None,stride = 1,seq_len = 1,cycle=168) -> None:
+    def __init__(self, patch_len, d_route, n_heads, kernel=5, n_groups=4,d_model=None,stride = 1,cycle=168) -> None:
         super().__init__()
         self.offset_range_factor = kernel
         self.d_model = d_model
-        self.seq_len = seq_len
+   
         self.stride = stride
         self.patch_len = patch_len
         self.d_route = d_route #1
@@ -165,8 +80,6 @@ class DeformAtten2D(nn.Module):
         self.n_group_channels = self.d_route // self.n_groups
         self.n_heads = n_heads
         self.n_head_channels = self.d_route // self.n_heads
-        self.n_group_heads = self.n_heads // self.n_groups
-        self.scale = self.n_head_channels ** -0.5
         self.cycle = cycle
 
         self.temporalQuery = torch.nn.Parameter(torch.zeros(self.cycle, self.d_model), requires_grad=True)
@@ -245,39 +158,22 @@ class DeformAtten2D(nn.Module):
 
 
 class CrossDeformAttn(nn.Module):
-    def __init__(self, seq_len, d_model, n_heads, dropout, droprate, 
+    def __init__(self, seq_len, d_model, droprate, 
                  n_days=1, window_size=4, patch_len=7, stride=3, cycle=168) -> None:
         super().__init__()
         self.n_days = n_days
         self.seq_len = seq_len
-        # 1d size: B*n_days, subseq_len, C
-        # 2d size: B*num_patches, 1, patch_len, C
-        self.subseq_len = seq_len // n_days + (1 if seq_len % n_days != 0 else 0)
         self.patch_len = patch_len
         self.stride = stride
         self.num_patches = num_patches(self.seq_len, self.patch_len, self.stride)
+        self.cycle = cycle
+
 
         self.layer_norm =  nn.LayerNorm(d_model)
 
-        # 1D
-        # Deform attention
-        self.deform_attn = DeformAtten1D(self.subseq_len, d_model, n_heads, dropout, kernel=window_size) 
-        self.attn_layers1d = nn.ModuleList([self.deform_attn])
-
-        self.mlps1d = nn.ModuleList(
-            [ 
-                MLP([d_model, d_model], final_relu=True, drop_out=0.0) for _ in range(len(self.attn_layers1d))
-            ]
-        )
-        self.drop_path1d = nn.ModuleList(
-            [
-                DropPath(droprate) if droprate > 0.0 else nn.Identity() for _ in range(len(self.attn_layers1d))
-            ]
-        )
-        #######################################
         # 2D
         d_route = 1
-        self.deform_attn2d = DeformAtten2D(self.patch_len, d_route, n_heads=1, kernel=window_size, n_groups=1,d_model=d_model,seq_len=seq_len,stride=stride,cycle=cycle)
+        self.deform_attn2d = DeformAtten2D(self.patch_len, d_route, n_heads=1, kernel=window_size, n_groups=1,d_model=d_model,stride=stride,cycle=cycle)
         self.write_out = nn.Linear(self.num_patches*self.patch_len, self.seq_len)
 
         self.attn_layers2d = nn.ModuleList([self.deform_attn2d])
@@ -293,28 +189,17 @@ class CrossDeformAttn(nn.Module):
             ]
         )
 
-        self.fc = nn.Linear(2*d_model, d_model)
+        self.fc = nn.Linear(d_model, d_model)
         
     def forward(self, x, attn_mask=None, tau=None, delta=None, cycle_index=None):
-        n_day = self.n_days 
         B, L, C = x.shape
 
+        #索引映射
         offsets = torch.arange(self.num_patches, device=cycle_index.device) * self.stride   # (N,)
-        cycle_index_patch = (cycle_index[:, None] + offsets[None, :]) % self.n_days # (B, N)
+        cycle_index_patch = (cycle_index[:, None] + offsets[None, :]) % self.cycle # (B, N)
         cycle_index_flat = cycle_index_patch.reshape(-1)  # (B*N,)
 
         x = self.layer_norm(x)
-        padding_len = (n_day - (L % n_day)) % n_day
-        x_padded = torch.cat((x, x[:, [0], :].expand(-1, padding_len, -1)), dim=1)
-        x_1d = rearrange(x_padded, 'b (seg_num ts_d) d_model -> (b ts_d) seg_num d_model', ts_d=n_day) 
-        for d, attn_layer in enumerate(self.attn_layers1d):
-            x0 = x_1d
-            x_1d = attn_layer(x_1d)
-            x_1d = self.drop_path1d[d](x_1d) + x0
-            x0 = x_1d
-            x_1d = self.mlps1d[d](self.layer_norm(x_1d))
-            x_1d = self.drop_path1d[d](x_1d) + x0
-        x_1d = rearrange(x_1d, '(b ts_d) seg_num d_model -> b (seg_num ts_d) d_model', ts_d=n_day)[:,:L,:]
 
         x_unfold = x.unfold(dimension=-2, size=self.patch_len, step=self.stride)
         x_2d = rearrange(x_unfold, 'b n c l -> (b n) l c').unsqueeze(-3)
@@ -330,8 +215,6 @@ class CrossDeformAttn(nn.Module):
         x_2d = rearrange(x_2d, 'b h w c -> b c h w')
         x_2d = rearrange(x_2d, '(b n) 1 l c -> b (n l) c', b=B)
         x_2d = self.write_out(x_2d.permute(0,2,1)).permute(0,2,1)
-
-        x = torch.concat([x_1d, x_2d], dim=-1)
         x = self.fc(x)
         return x, None
     

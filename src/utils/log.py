@@ -32,7 +32,9 @@ PARAM_FILTER = [
 
 DEFAULT_FIELDS = [
     'epoch', 'iter', 'train_loss', 'vali_loss', 'test_loss',
-    'vali_mse', 'test_mse', 'speed', 'cost_time', 'epoch_time'
+    'vali_mae', 'vali_mse', 'vali_rmse', 'vali_mape', 'vali_mspe', 'vali_smape',
+    'test_mae', 'test_mse', 'test_rmse', 'test_mape', 'test_mspe', 'test_smape',
+    'speed', 'cost_time', 'epoch_time'
 ]
 
 
