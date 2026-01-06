@@ -326,12 +326,12 @@ class exp_MTS_forecasting(Exp_Basic):
 
         self.logger.log({
             'epoch': 'test',
-            'test_mae': metrics['mae'],
-            'test_mse': metrics['mse'],
-            'test_rmse': metrics['rmse'],
-            'test_mape': metrics['mape'],
-            'test_mspe': metrics['mspe'],
-            'test_smape': metrics['smape'],
+            'test_mae': 'mae:{:.7f}'.format(metrics['mae']),
+            'test_mse': 'mse:{:.7f}'.format(metrics['mse']),
+            'test_rmse': 'rmse:{:.7f}'.format(metrics['rmse']),
+            'test_mape': 'mape:{:.7f}'.format(metrics['mape']),
+            'test_mspe': 'mspe:{:.7f}'.format(metrics['mspe']),
+            'test_smape': 'smape:{:.7f}'.format(metrics['smape']),
         })
 
         f = open("result.txt", 'a')
