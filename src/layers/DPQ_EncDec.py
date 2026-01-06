@@ -215,7 +215,7 @@ class CrossDeformAttn(nn.Module):
         x_2d = rearrange(x_2d, 'b h w c -> b c h w')
         x_2d = rearrange(x_2d, '(b n) 1 l c -> b (n l) c', b=B)
         x_2d = self.write_out(x_2d.permute(0,2,1)).permute(0,2,1)
-        x = self.fc(x)
+        x = self.fc(x_2d)
         return x, None
     
 class PositionalEmbedding(nn.Module):
