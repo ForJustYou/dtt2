@@ -256,7 +256,7 @@ class CrossDeformAttn(nn.Module):
         self.patch_len = patch_len
         self.stride = stride
         self.num_patches = num_patches(self.seq_len, self.patch_len, self.stride)
-
+        self.cycle = cycle
         self.layer_norm =  nn.LayerNorm(d_model)
 
         # 1D
@@ -300,7 +300,7 @@ class CrossDeformAttn(nn.Module):
         B, L, C = x.shape
 
         offsets = torch.arange(self.num_patches, device=cycle_index.device) * self.stride   # (N,)
-        cycle_index_patch = (cycle_index[:, None] + offsets[None, :]) % self.n_days # (B, N)
+        cycle_index_patch = (cycle_index[:, None] + offsets[None, :]) % self.cycle # (B, N)
         cycle_index_flat = cycle_index_patch.reshape(-1)  # (B*N,)
 
         x = self.layer_norm(x)
