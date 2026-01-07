@@ -188,8 +188,8 @@ class exp_MTS_forecasting(Exp_Basic):
                          #记录日志
                         self.logger.log({
                             'iter': i + 1,
-                            'train_loss': round(loss.item(),3),
-                            'speed': round(speed,2),
+                            'train_loss': '{:.4f}'.format(loss.item()),
+                            'speed': '{:.4f}'.format(speed),
                         })   
 
                 if self.args.use_amp:
@@ -216,22 +216,22 @@ class exp_MTS_forecasting(Exp_Basic):
             # log
             self.logger.log({
                 'epoch': epoch + 1,
-                'train_loss': train_loss,
-                'vali_loss': vali_loss,
-                'test_loss': test_loss,
-                'vali_mae': vali_metrics['mae'],
-                'vali_mse': vali_metrics['mse'],
-                'vali_rmse': vali_metrics['rmse'],
-                'vali_mape': vali_metrics['mape'],
-                'vali_mspe': vali_metrics['mspe'],
-                'vali_smape': vali_metrics['smape'],
-                'test_mae': test_metrics['mae'],
-                'test_mse': test_metrics['mse'],
-                'test_rmse': test_metrics['rmse'],
-                'test_mape': test_metrics['mape'],
-                'test_mspe': test_metrics['mspe'],
-                'test_smape': test_metrics['smape'],
-                'cost_time': round(time.time() - epoch_time,3),
+                'train_loss': '{:.4f}'.format(train_loss),
+                'vali_loss': '{:.4f}'.format(vali_loss),
+                'test_loss': '{:.4f}'.format(test_loss),
+                'vali_mae': '{:.4f}'.format(vali_metrics['mae']),
+                'vali_mse': '{:.4f}'.format(vali_metrics['mse']),
+                'vali_rmse': '{:.4f}'.format(vali_metrics['rmse']),
+                'vali_mape': '{:.4f}'.format(vali_metrics['mape']),
+                'vali_mspe': '{:.4f}'.format(vali_metrics['mspe']),
+                'vali_smape': '{:.4f}'.format(vali_metrics['smape']),
+                'test_mae': '{:.4f}'.format(test_metrics['mae']),
+                'test_mse': '{:.4f}'.format(test_metrics['mse']),
+                'test_rmse': '{:.4f}'.format(test_metrics['rmse']),
+                'test_mape': '{:.4f}'.format(test_metrics['mape']),
+                'test_mspe': '{:.4f}'.format(test_metrics['mspe']),
+                'test_smape': '{:.4f}'.format(test_metrics['smape']),
+                'cost_time': '{:.4f}'.format(time.time() - epoch_time),
                 'epoch_time': datetime.now().isoformat(timespec="seconds"),
             })
 
@@ -335,12 +335,12 @@ class exp_MTS_forecasting(Exp_Basic):
         })
         self.logger.log({
             'epoch': 'test',
-            'test_mae': metrics['mae'],
-            'test_mse': metrics['mse'],
-            'test_rmse': metrics['rmse'],
-            'test_mape': metrics['mape'],
-            'test_mspe': metrics['mspe'],
-            'test_smape': metrics['smape'],
+            'test_mae': '{:.4f}'.format(metrics['mae']),
+            'test_mse': '{:.4f}'.format(metrics['mse']),
+            'test_rmse': '{:.4f}'.format(metrics['rmse']),
+            'test_mape': '{:.4f}'.format(metrics['mape']),
+            'test_mspe': '{:.4f}'.format(metrics['mspe']),
+            'test_smape': '{:.4f}'.format(metrics['smape']),
         })
 
         f = open("result.txt", 'a')

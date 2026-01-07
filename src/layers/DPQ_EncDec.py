@@ -110,7 +110,7 @@ class DeformAtten2D(nn.Module):
         query_input = self.temporalQuery[gather_index]  # (b, c, s)
         query = query_input.unfold(dimension=-2, size=self.patch_len, step=self.stride)
         query = rearrange(query, 'b n c l -> (b n) l c').unsqueeze(-3)
-        q = self.proj_q(query) + self.proj_q(x) # B, 1, H, W
+        q = self.proj_q(query + x)# B, 1, H, W
         
 
         offset = self.proj_offset(q) # B, 2, H, W
