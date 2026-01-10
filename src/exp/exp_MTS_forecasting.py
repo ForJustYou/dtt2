@@ -2,6 +2,11 @@ from data.data_provider.data_factory import data_provider
 from src.exp.exp_basic import Exp_Basic
 from src.utils.tools import EarlyStopping, adjust_learning_rate
 from src.utils.metrics import MAE, MSE, RMSE, MAPE, MSPE, SMAPE
+from pathlib import Path
+try:
+    from src.utils.genCompareImg import generate_for_folder
+except Exception:
+    generate_for_folder = None
 import torch
 import torch.nn as nn
 from torch import optim
@@ -354,5 +359,16 @@ class exp_MTS_forecasting(Exp_Basic):
 
         np.save(folder_path + 'pred.npy', preds)
         np.save(folder_path + 'true.npy', trues)
+        if generate_for_folder is not None:
+            try:
+                generate_for_folder(
+                    Path(folder_path),
+                    output_name="pred_true_compare.png",
+                    feature_index=-1,
+                    max_points=2000,
+                    force=False,
+                )
+            except Exception as exc:
+                print(f"[warn] image generation failed: {exc}")
 
         return

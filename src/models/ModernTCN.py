@@ -350,7 +350,7 @@ class Model(nn.Module):
         # hyper param
         missing_fields = {
             "stem_ratio": 6,
-            "downsample_ratio": 2,
+            "downsample_ratio": 1,
             "ffn_ratio": 2,
             "num_blocks": [1,1,1,1],
             "large_size": [31,29,27,13],

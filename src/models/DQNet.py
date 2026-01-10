@@ -1,5 +1,5 @@
 import torch
-from src.layers.DQNet_EncDec import *
+from src.layers.DeformPQ_EncDec import *
 from torch import nn
 from einops import rearrange
 import math
@@ -27,21 +27,7 @@ class Model(nn.Module):
         self.f_dim = configs.enc_in
         self.c_out = configs.c_out
         self.dropout = configs.dropout
-        self.cycle_len = configs.cycle
-
-        channel_aggre_heads = 4
-        if self.seq_len % channel_aggre_heads != 0:
-            channel_aggre_heads = 1
-
-        self.temporalQuery = torch.nn.Parameter(
-            torch.zeros(self.cycle_len, self.f_dim), requires_grad=True
-        )
-        self.channelAggregator = nn.MultiheadAttention(
-            embed_dim=self.seq_len,
-            num_heads=channel_aggre_heads,
-            batch_first=True,
-            dropout=self.dropout,
-        )
+        self.kernel_size = configs.kernel
 
         # Embedding
         if configs.enc_in == 1:
@@ -70,6 +56,7 @@ class Model(nn.Module):
                                 window_size=configs.kernel, 
                                 patch_len=configs.patch_len, 
                                 stride=configs.stride,
+                                cycle=configs.cycle
                                 ) for l in range(configs.e_layers)
             ],
             norm_layer=Layernorm(configs.d_model)
@@ -99,18 +86,11 @@ class Model(nn.Module):
         std_enc = torch.sqrt(torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5).detach()
         x_enc = x_enc / std_enc
 
-        x_input = x_enc.permute(0, 2, 1)
-        cycle_index = cycle_index.long()
-        gather_index = (cycle_index.view(-1, 1) + torch.arange(self.seq_len, device=cycle_index.device).view(1, -1)) % self.cycle_len
-        query_input = self.temporalQuery[gather_index].permute(0, 2, 1)
-        channel_info = self.channelAggregator(query=query_input, key=x_input, value=x_input)[0]
-        x_enc = x_enc + channel_info.permute(0, 2, 1)
-
         x_enc = self.enc_value_embedding(x_enc)
         x_enc = self.pre_norm(x_enc)
 
         # Deformed attention
-        enc_out, _ = self.encoder(x_enc) 
+        enc_out, _ = self.encoder(x_enc,cycle_index=cycle_index) 
 
         # Decoder
         h0 = torch.zeros(self.d_layers, x_enc.size(0), self.d_model).requires_grad_().to(x_enc.device)

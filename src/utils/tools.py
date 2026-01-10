@@ -78,7 +78,7 @@ class StandardScaler():
         return (data * self.std) + self.mean
 
 
-def visual(true, preds=None, name='./pic/test.pdf'):
+def visual(true, preds=None, name='./pic/test.pdf', title=None):
     """
     Results visualization
     """
@@ -87,6 +87,8 @@ def visual(true, preds=None, name='./pic/test.pdf'):
     if preds is not None:
         plt.plot(preds, label='Prediction', linewidth=2)
     plt.legend()
+    if title:
+        plt.title(title)
     plt.savefig(name, bbox_inches='tight')
 
 

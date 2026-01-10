@@ -14,11 +14,11 @@ class Encoder(nn.Module):
         self.attn_layers = nn.ModuleList(attn_layers)
         self.norm = norm_layer
 
-    def forward(self, x, attn_mask=None, tau=None, delta=None):
+    def forward(self, x, attn_mask=None, tau=None, delta=None, cycle_index=None):
         # x [B, L, D]
         attns = []
         for attn_layer in self.attn_layers:
-            x, attn = attn_layer(x, attn_mask=attn_mask, tau=tau, delta=delta)
+            x, attn = attn_layer(x, attn_mask=attn_mask, tau=tau, delta=delta, cycle_index=cycle_index)
             attns.append(attn)
 
         if self.norm is not None:
@@ -153,7 +153,7 @@ class DeformAtten2D(nn.Module):
     '''
         max_offset (int): The maximum magnitude of the offset residue. Default: 14.
     '''
-    def __init__(self, patch_len, d_route, n_heads, kernel=5, n_groups=4,d_model=None,stride = 1,seq_len = 1) -> None:
+    def __init__(self, patch_len, d_route, n_heads, kernel=5, n_groups=4,d_model=None,stride = 1,seq_len = 1,cycle=168) -> None:
         super().__init__()
         self.offset_range_factor = kernel
         self.d_model = d_model
@@ -167,6 +167,11 @@ class DeformAtten2D(nn.Module):
         self.n_head_channels = self.d_route // self.n_heads
         self.n_group_heads = self.n_heads // self.n_groups
         self.scale = self.n_head_channels ** -0.5
+        self.cycle = cycle
+        self.cycle_scale = 0.1
+
+
+        self.temporalQuery = torch.nn.Parameter(torch.zeros(self.cycle, self.d_model), requires_grad=True)
 
         self.proj_q = nn.Conv2d(self.d_route, self.d_route, kernel_size=1, stride=1, padding=0)
         self.proj_k = nn.Conv2d(self.d_route, self.d_route, kernel_size=1, stride=1, padding=0)
@@ -185,14 +190,18 @@ class DeformAtten2D(nn.Module):
         trunc_normal_(self.relative_position_bias_table, std=.02)
 
 
-    def forward(self, x):
+    def forward(self, x, cycle_index):
         B, H, W, C = x.shape
         x = x.permute(0, 3, 1, 2) # B, C, H, W
         #416 1 7 64
-      
-        q = self.proj_q(x) # B, 1, H, W
+        cycle_index = cycle_index.long()
+        gather_index = (cycle_index.view(-1, 1) + torch.arange(self.patch_len, device=cycle_index.device).view(1, -1)) % self.cycle
+        query_input = self.temporalQuery[gather_index]  # (b, c, s)
+        query = query_input.unfold(dimension=-2, size=self.patch_len, step=self.stride)
+        query = rearrange(query, 'b n c l -> (b n) l c').unsqueeze(-3)
+        q = self.proj_q(query) # B, 1, H, W
 
-        offset = self.proj_offset(q) # B, 2, H, W
+        offset = self.proj_offset(self.proj_q(x) + q * self.cycle_scale) # B, 2, H, W
 
         if self.offset_range_factor >= 0:
             offset = offset.tanh().mul(self.offset_range_factor)
@@ -239,7 +248,7 @@ class DeformAtten2D(nn.Module):
 
 class CrossDeformAttn(nn.Module):
     def __init__(self, seq_len, d_model, n_heads, dropout, droprate, 
-                 n_days=1, window_size=4, patch_len=7, stride=3) -> None:
+                 n_days=1, window_size=4, patch_len=7, stride=3, cycle=168) -> None:
         super().__init__()
         self.n_days = n_days
         self.seq_len = seq_len
@@ -249,6 +258,7 @@ class CrossDeformAttn(nn.Module):
         self.patch_len = patch_len
         self.stride = stride
         self.num_patches = num_patches(self.seq_len, self.patch_len, self.stride)
+        self.cycle = cycle
         self.layer_norm =  nn.LayerNorm(d_model)
 
         # 1D
@@ -269,7 +279,7 @@ class CrossDeformAttn(nn.Module):
         #######################################
         # 2D
         d_route = 1
-        self.deform_attn2d = DeformAtten2D(self.patch_len, d_route, n_heads=1, kernel=window_size, n_groups=1,d_model=d_model,seq_len=seq_len,stride=stride)
+        self.deform_attn2d = DeformAtten2D(self.patch_len, d_route, n_heads=1, kernel=window_size, n_groups=1,d_model=d_model,seq_len=seq_len,stride=stride,cycle=cycle)
         self.write_out = nn.Linear(self.num_patches*self.patch_len, self.seq_len)
 
         self.attn_layers2d = nn.ModuleList([self.deform_attn2d])
@@ -287,9 +297,13 @@ class CrossDeformAttn(nn.Module):
 
         self.fc = nn.Linear(2*d_model, d_model)
         
-    def forward(self, x, attn_mask=None, tau=None, delta=None):
+    def forward(self, x, attn_mask=None, tau=None, delta=None, cycle_index=None):
         n_day = self.n_days 
         B, L, C = x.shape
+
+        offsets = torch.arange(self.num_patches, device=cycle_index.device) * self.stride   # (N,)
+        cycle_index_patch = (cycle_index[:, None] + offsets[None, :]) % self.cycle # (B, N)
+        cycle_index_flat = cycle_index_patch.reshape(-1)  # (B*N,)
 
         x = self.layer_norm(x)
         padding_len = (n_day - (L % n_day)) % n_day
@@ -310,7 +324,7 @@ class CrossDeformAttn(nn.Module):
 
         for d, attn_layer in enumerate(self.attn_layers2d):
             x0 = x_2d
-            x_2d = attn_layer(x_2d)
+            x_2d = attn_layer(x_2d,cycle_index_flat)
             x_2d = self.drop_path2d[d](x_2d) + x0
             x0 = x_2d
             x_2d = self.mlps2d[d](self.layer_norm(x_2d.permute(0,1,3,2))).permute(0,1,3,2)
