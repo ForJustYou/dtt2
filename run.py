@@ -34,8 +34,6 @@ if __name__ == '__main__':
     parser.add_argument('--label_len', type=int, default=48, help='start token length')
     parser.add_argument('--pred_len', type=int, default=96, help='prediction sequence length')
     parser.add_argument('--seasonal_patterns', type=str, default='Monthly', help='subset for M4')
-    parser.add_argument('--pretreatment', type=int, default=0, help='pretreatment')
-    parser.add_argument('--cycle', type=int, default=168, help='cycle length ')
     parser.add_argument('--inverse', action='store_true', help='inverse output data', default=False)
 
     # model define
@@ -80,6 +78,10 @@ if __name__ == '__main__':
     parser.add_argument('--kernel', type=int, default=6, help='kernel size')
     parser.add_argument('--n_reshape', type=int, default=16)
 
+    # DQNet parameters
+    parser.add_argument('--pretreatment', type=int, default=0, help='pretreatment')
+    parser.add_argument('--cycle', type=int, default=168, help='cycle length ')
+    
     args = parser.parse_args()
     args.stride = args.patch_len
     args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False

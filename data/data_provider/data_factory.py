@@ -36,9 +36,6 @@ def data_provider(args, flag):
         seasonal_patterns=args.seasonal_patterns,
         cycle=args.cycle,
     )
-    if args.data == 'SHEERM' or args.data == 'PSHE' or args.data == 'CityLearn' or args.data == 'Estonian':
-        data_kwargs['pretreatment'] = args.pretreatment
-        data_kwargs['cycle'] = args.cycle
 
     data_set = Data(**data_kwargs)
     

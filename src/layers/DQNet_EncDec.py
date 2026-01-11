@@ -195,7 +195,7 @@ class DeformAtten2D(nn.Module):
         x = x.permute(0, 3, 1, 2) # B, C, H, W
         #416 1 7 64
         cycle_index = cycle_index.long()
-        gather_index = (cycle_index.view(-1, 1) + torch.arange(self.patch_len, device=cycle_index.device).view(1, -1)) % self.cycle
+        gather_index = cycle_index % self.cycle
         query_input = self.temporalQuery[gather_index]  # (b, c, s)
         query = query_input.unfold(dimension=-2, size=self.patch_len, step=self.stride)
         query = rearrange(query, 'b n c l -> (b n) l c').unsqueeze(-3)
@@ -300,10 +300,10 @@ class CrossDeformAttn(nn.Module):
     def forward(self, x, attn_mask=None, tau=None, delta=None, cycle_index=None):
         n_day = self.n_days 
         B, L, C = x.shape
-
-        offsets = torch.arange(self.num_patches, device=cycle_index.device) * self.stride   # (N,)
-        cycle_index_patch = (cycle_index[:, None] + offsets[None, :]) % self.cycle # (B, N)
-        cycle_index_flat = cycle_index_patch.reshape(-1)  # (B*N,)
+        
+        assert cycle_index.dim() == 2
+        cycle_index_patch = cycle_index.unfold(dimension=1, size=self.patch_len, step=self.stride)
+        cycle_index_flat = cycle_index_patch.reshape(-1, self.patch_len)
 
         x = self.layer_norm(x)
         padding_len = (n_day - (L % n_day)) % n_day
@@ -355,19 +355,6 @@ class PositionalEmbedding(nn.Module):
 
     def forward(self, x):
         return self.pe[:, :x.size(1)]
-
-class Deform_Temporal_Embedding(nn.Module):
-    def __init__(self, d_inp, d_model, embed_type='fixed', freq='h', dropout=0.1):
-        super(Deform_Temporal_Embedding, self).__init__()
-
-        self.value_embedding = nn.Linear(d_inp, d_model, bias=False)
-        self.position_embedding = PositionalEmbedding(d_model)
-
-        self.dropout = nn.Dropout(p=dropout)
-
-    def forward(self, x):
-        x = self.value_embedding(x) + self.position_embedding(x)
-        return self.dropout(x)
 
 class Local_Temporal_Embedding(nn.Module):
     def __init__(self, d_inp, d_model, padding, sub_groups=8, dropout=0.1):

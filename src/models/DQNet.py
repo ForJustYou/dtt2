@@ -1,8 +1,8 @@
 import torch
-from src.layers.DeformPQ_EncDec import *
+from src.layers.DQNet_EncDec import *
 from torch import nn
-from einops import rearrange
 import math
+from src.utils.time_cycle import cycle_index_from_mark
 
 
 
@@ -28,16 +28,15 @@ class Model(nn.Module):
         self.c_out = configs.c_out
         self.dropout = configs.dropout
         self.kernel_size = configs.kernel
+        self.cycle = configs.cycle
+        self.freq = configs.freq
+        self.timeenc = 0 if getattr(configs, "embed", "timeF") != "timeF" else 1
 
-        # Embedding
-        if configs.enc_in == 1:
-            self.enc_value_embedding = Deform_Temporal_Embedding(self.f_dim, self.d_model, freq='d')
-        else:
-            self.s_group = 4
-            assert self.d_model % self.s_group == 0
-            # Embedding local patches
-            self.pad_in_len = math.ceil(1.0 * configs.enc_in / self.s_group) * self.s_group
-            self.enc_value_embedding = Local_Temporal_Embedding(self.pad_in_len//self.s_group, self.d_model, self.pad_in_len-configs.enc_in, self.s_group)
+        self.s_group = 4
+        assert self.d_model % self.s_group == 0
+        # Embedding local patches
+        self.pad_in_len = math.ceil(1.0 * configs.enc_in / self.s_group) * self.s_group
+        self.enc_value_embedding = Local_Temporal_Embedding(self.pad_in_len//self.s_group, self.d_model, self.pad_in_len-configs.enc_in, self.s_group)
 
         self.pre_norm = nn.LayerNorm(configs.d_model)
         # Encoder
@@ -77,7 +76,7 @@ class Model(nn.Module):
         # Projection layer
         self.projection = nn.Linear(self.d_model, self.f_dim)
 
-    def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec,cycle_index):
+    def forecast(self, x_enc, x_mark_enc, x_dec, x_mark_dec):
         assert x_enc.shape[-1] == self.f_dim
 
         # Series Stationarization adopted from NSformer, optional
@@ -90,7 +89,9 @@ class Model(nn.Module):
         x_enc = self.pre_norm(x_enc)
 
         # Deformed attention
-        enc_out, _ = self.encoder(x_enc,cycle_index=cycle_index) 
+        cycle_from_mark = cycle_index_from_mark(x_mark_enc, self.cycle, freq=self.freq, timeenc=self.timeenc)
+        assert cycle_from_mark is not None, "Please set cycle and time features for DQNet."
+        enc_out, _ = self.encoder(x_enc,cycle_index=cycle_from_mark) 
 
         # Decoder
         h0 = torch.zeros(self.d_layers, x_enc.size(0), self.d_model).requires_grad_().to(x_enc.device)
@@ -104,5 +105,5 @@ class Model(nn.Module):
         return out
     
     def forward(self, x_enc, x_mark_enc=None, x_dec=None, x_mark_dec=None, cycle_index=None):
-        dec_out = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec, cycle_index=cycle_index)
+        dec_out = self.forecast(x_enc, x_mark_enc, x_dec, x_mark_dec)
         return dec_out[:, -self.pred_len:, :]

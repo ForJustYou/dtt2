@@ -30,18 +30,14 @@ class Dataset_SHEERM(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='MS', data_path='SHEERM.csv',
                  target='Net Load', scale=True, timeenc=0, freq='15min', 
-                 seasonal_patterns=None, pretreatment=False, cycle=168):
-        if size is None:
-            self.seq_len = 24 * 4  # 1 day of 15-min data
-            self.label_len = 12 * 4
-            self.pred_len = 24 * 4
-        else:
-            self.seq_len = size[0]
-            self.label_len = size[1]
-            self.pred_len = size[2]
+                 seasonal_patterns=None, pretreatment=False, cycle=None):
+        assert not size ==  None
         assert flag in ['train', 'test', 'val']
         type_map = {'train': 0, 'val': 1, 'test': 2}
         self.set_type = type_map[flag]
+        self.seq_len = size[0]
+        self.label_len = size[1]
+        self.pred_len = size[2]
         self.cycle = cycle  # weekly cycle for 15-min data
         self.features = features
         self.target = target
@@ -131,17 +127,13 @@ class Dataset_PSHE(Dataset):
                  features='MS', data_path='PSHE.csv',
                  target='NetLoad', scale=True, timeenc=0, freq='30min',
                  seasonal_patterns=None, pretreatment=False, cycle=168):
-        if size is None:
-            self.seq_len = 24 * 4  # 1 day of 15-min data
-            self.label_len = 12 * 4
-            self.pred_len = 24 * 4
-        else:
-            self.seq_len = size[0]
-            self.label_len = size[1]
-            self.pred_len = size[2]
+        assert not size ==  None
         assert flag in ['train', 'test', 'val']
         type_map = {'train': 0, 'val': 1, 'test': 2}
         self.set_type = type_map[flag]
+        self.seq_len = size[0]
+        self.label_len = size[1]
+        self.pred_len = size[2]
         self.cycle = cycle  # weekly cycle for 15-min data
         self.features = features
         self.target = target
@@ -227,17 +219,13 @@ class Dataset_CityLearn(Dataset):
                  features='MS', data_path='SHEERM.csv',
                  target='Net Load', scale=True, timeenc=0, freq='15min', 
                  seasonal_patterns=None, pretreatment=False, cycle=168):
-        if size is None:
-            self.seq_len = 24 * 4  # 1 day of 15-min data
-            self.label_len = 12 * 4
-            self.pred_len = 24 * 4
-        else:
-            self.seq_len = size[0]
-            self.label_len = size[1]
-            self.pred_len = size[2]
+        assert not size ==  None
         assert flag in ['train', 'test', 'val']
         type_map = {'train': 0, 'val': 1, 'test': 2}
         self.set_type = type_map[flag]
+        self.seq_len = size[0]
+        self.label_len = size[1]
+        self.pred_len = size[2]
         self.cycle = cycle  # weekly cycle for 15-min data
         self.features = features
         self.target = target
@@ -327,17 +315,13 @@ class Dataset_Estonian(Dataset):
                  features='MS', data_path='Estonian.csv',
                  target='NetLoad', scale=True, timeenc=0, freq='h',
                  seasonal_patterns=None, pretreatment=False, cycle=168):
-        if size is None:
-            self.seq_len = 24  # 1 day of hourly data
-            self.label_len = 12
-            self.pred_len = 24
-        else:
-            self.seq_len = size[0]
-            self.label_len = size[1]
-            self.pred_len = size[2]
+        assert not size ==  None
         assert flag in ['train', 'test', 'val']
         type_map = {'train': 0, 'val': 1, 'test': 2}
         self.set_type = type_map[flag]
+        self.seq_len = size[0]
+        self.label_len = size[1]
+        self.pred_len = size[2]
         self.cycle = cycle
         self.features = features
         self.target = target
