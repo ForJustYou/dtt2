@@ -28,6 +28,7 @@ PARAM_FILTER = [
     "batch_size",
     "learning_rate",
     "cycle",
+    "cycle_mode",
 ]
 
 DEFAULT_FIELDS = [
@@ -53,7 +54,7 @@ def init_csv_logger(arg_model, arg_data, params: Optional[Dict] = None, data_sub
         )
 
 def default_log_filename(model: str, data: str, log_dir: str = DEFAULT_LOG_DIR) -> str:
-    ts = datetime.now().strftime("%Y%m%d_%H%M")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     return os.path.join(log_dir, f"{model}_{data}_{ts}.csv")
 
 class CSVLogger:

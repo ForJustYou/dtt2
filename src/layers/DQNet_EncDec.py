@@ -199,7 +199,7 @@ class DeformAtten2D(nn.Module):
         query = rearrange(query, 'b n c l -> (b n) l c').unsqueeze(-3)
         if self.cycle_mode == "q" or self.cycle_mode == "qk":
             q = self.proj_q(query) # B, 1, H, W
-        elif self.cycle_mode == "":
+        elif self.cycle_mode == "None":
             q = self.proj_q(x) # B, C, H, W
         else:
             raise ValueError("Unknown cycle_mode {}".format(self.cycle_mode))
