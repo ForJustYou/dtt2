@@ -81,6 +81,7 @@ if __name__ == '__main__':
     # DQNet parameters
     parser.add_argument('--pretreatment', type=int, default=0, help='pretreatment')
     parser.add_argument('--cycle', type=int, default=168, help='cycle length ')
+    parser.add_argument('--cycle_mode', type=str, default='q', help='ablation of cycle ')
     
     args = parser.parse_args()
     args.stride = args.patch_len

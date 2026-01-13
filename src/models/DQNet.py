@@ -55,22 +55,18 @@ class Model(nn.Module):
                                 window_size=configs.kernel, 
                                 patch_len=configs.patch_len, 
                                 stride=configs.stride,
-                                cycle=configs.cycle
+                                cycle=configs.cycle,
+                                cycle_mode=configs.cycle_mode
                                 ) for l in range(configs.e_layers)
             ],
             norm_layer=Layernorm(configs.d_model)
         )
 
-        # GRU layers
-        self.gru = torch.nn.GRU(
-            self.d_model, self.d_model, self.d_layers, batch_first=True, dropout=configs.dropout
-        )
-
-        # MLP layer
-        self.fc = nn.Sequential(
-            nn.Linear(self.seq_len, self.d_model),
-            nn.LeakyReLU(),
-            nn.Linear(self.d_model, self.pred_len)
+        # Coarse-to-fine decoder
+        self.decoder = CoarseToFineDecoder(
+            seq_len=self.seq_len,
+            pred_len=self.pred_len,
+            d_model=self.d_model,
         )
 
         # Projection layer
@@ -94,9 +90,7 @@ class Model(nn.Module):
         enc_out, _ = self.encoder(x_enc,cycle_index=cycle_from_mark) 
 
         # Decoder
-        h0 = torch.zeros(self.d_layers, x_enc.size(0), self.d_model).requires_grad_().to(x_enc.device)
-        out, _ = self.gru(enc_out, h0.detach())
-        out = self.fc(out.permute(0,2,1)).permute(0,2,1)
+        out = self.decoder(enc_out)
 
         # Projection
         out = self.projection(out)

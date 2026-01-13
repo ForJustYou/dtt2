@@ -153,7 +153,7 @@ class DeformAtten2D(nn.Module):
     '''
         max_offset (int): The maximum magnitude of the offset residue. Default: 14.
     '''
-    def __init__(self, patch_len, d_route, n_heads, kernel=5, n_groups=4,d_model=None,stride = 1,seq_len = 1,cycle=168) -> None:
+    def __init__(self, patch_len, d_route, n_heads, kernel=5, n_groups=4, d_model=None, stride=1, seq_len=1, cycle=168, cycle_mode="q") -> None:
         super().__init__()
         self.offset_range_factor = kernel
         self.d_model = d_model
@@ -168,9 +168,7 @@ class DeformAtten2D(nn.Module):
         self.n_group_heads = self.n_heads // self.n_groups
         self.scale = self.n_head_channels ** -0.5
         self.cycle = cycle
-        self.cycle_scale = 0.1
-
-
+        self.cycle_mode = cycle_mode
         self.temporalQuery = torch.nn.Parameter(torch.zeros(self.cycle, self.d_model), requires_grad=True)
 
         self.proj_q = nn.Conv2d(self.d_route, self.d_route, kernel_size=1, stride=1, padding=0)
@@ -199,9 +197,13 @@ class DeformAtten2D(nn.Module):
         query_input = self.temporalQuery[gather_index]  # (b, c, s)
         query = query_input.unfold(dimension=-2, size=self.patch_len, step=self.stride)
         query = rearrange(query, 'b n c l -> (b n) l c').unsqueeze(-3)
-        q = self.proj_q(query) # B, 1, H, W
-
-        offset = self.proj_offset(self.proj_q(x) + q * self.cycle_scale) # B, 2, H, W
+        if self.cycle_mode == "q" or self.cycle_mode == "qk":
+            q = self.proj_q(query) # B, 1, H, W
+        elif self.cycle_mode == "":
+            q = self.proj_q(x) # B, C, H, W
+        else:
+            raise ValueError("Unknown cycle_mode {}".format(self.cycle_mode))
+        offset = self.proj_offset(q) # B, 2, H, W
 
         if self.offset_range_factor >= 0:
             offset = offset.tanh().mul(self.offset_range_factor)
@@ -235,7 +237,10 @@ class DeformAtten2D(nn.Module):
         x_sampled = F.grid_sample(x,vgrid_scaled,
         mode = 'bilinear', padding_mode = 'zeros', align_corners = False)[:,:,:H,:W]
         x_sampled = rearrange(x_sampled, '(b g) c h w -> b (g c) h w', g=self.n_groups)
-        k = self.proj_k(x_sampled).reshape(B * self.n_heads, H, W)
+        if self.cycle_mode == "qk":
+            k = self.proj_k(query).reshape(B * self.n_heads, H, W)
+        else:
+            k = self.proj_k(x_sampled).reshape(B * self.n_heads, H, W)
         v = self.proj_v(x_sampled)
         v = (v + self.relative_position_bias_table).reshape(B * self.n_heads, H, W)
         q = q.reshape(B * self.n_heads, H, W)
@@ -247,8 +252,8 @@ class DeformAtten2D(nn.Module):
 
 
 class CrossDeformAttn(nn.Module):
-    def __init__(self, seq_len, d_model, n_heads, dropout, droprate, 
-                 n_days=1, window_size=4, patch_len=7, stride=3, cycle=168) -> None:
+    def __init__(self, seq_len, d_model, n_heads, dropout, droprate,
+                 n_days=1, window_size=4, patch_len=7, stride=3, cycle=168, cycle_mode="q") -> None:
         super().__init__()
         self.n_days = n_days
         self.seq_len = seq_len
@@ -259,6 +264,7 @@ class CrossDeformAttn(nn.Module):
         self.stride = stride
         self.num_patches = num_patches(self.seq_len, self.patch_len, self.stride)
         self.cycle = cycle
+        self.cycle_mode = cycle_mode
         self.layer_norm =  nn.LayerNorm(d_model)
 
         # 1D
@@ -279,7 +285,18 @@ class CrossDeformAttn(nn.Module):
         #######################################
         # 2D
         d_route = 1
-        self.deform_attn2d = DeformAtten2D(self.patch_len, d_route, n_heads=1, kernel=window_size, n_groups=1,d_model=d_model,seq_len=seq_len,stride=stride,cycle=cycle)
+        self.deform_attn2d = DeformAtten2D(
+            self.patch_len,
+            d_route,
+            n_heads=1,
+            kernel=window_size,
+            n_groups=1,
+            d_model=d_model,
+            seq_len=seq_len,
+            stride=stride,
+            cycle=cycle,
+            cycle_mode=cycle_mode,
+        )
         self.write_out = nn.Linear(self.num_patches*self.patch_len, self.seq_len)
 
         self.attn_layers2d = nn.ModuleList([self.deform_attn2d])
@@ -378,3 +395,35 @@ class Local_Temporal_Embedding(nn.Module):
         x = rearrange(x, '(b g) l c -> b l (g c)', b = B)[:,:,:self.d_model]
         x = x + self.position_embedding(x)
         return self.dropout(x)
+
+
+class CoarseToFineDecoder(nn.Module):
+    def __init__(self, seq_len, pred_len, d_model, coarse_factor=4, tcn_kernel=3):
+        super().__init__()
+        self.seq_len = seq_len
+        self.pred_len = pred_len
+        self.coarse_factor = max(1, int(coarse_factor))
+        self.coarse_len = max(1, math.ceil(pred_len / self.coarse_factor))
+
+        self.coarse_proj = nn.Sequential(
+            nn.Linear(seq_len, d_model),
+            nn.LeakyReLU(),
+            nn.Linear(d_model, self.coarse_len),
+        )
+
+        padding = tcn_kernel // 2
+        self.refine = nn.Sequential(
+            nn.Conv1d(d_model, d_model, kernel_size=tcn_kernel, padding=padding),
+            nn.LeakyReLU(),
+            nn.Conv1d(d_model, d_model, kernel_size=tcn_kernel, padding=padding),
+        )
+
+    def forward(self, x):
+        x = x.permute(0, 2, 1)
+        coarse = self.coarse_proj(x)
+        if self.coarse_len == self.pred_len:
+            up = coarse
+        else:
+            up = F.interpolate(coarse, size=self.pred_len, mode='linear', align_corners=False)
+        refined = up + self.refine(up)
+        return refined.permute(0, 2, 1)
