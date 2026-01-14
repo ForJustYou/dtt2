@@ -1,4 +1,5 @@
 import argparse
+from datetime import datetime
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import torch
 from src.exp.exp_MTS_forecasting import exp_MTS_forecasting
@@ -84,6 +85,8 @@ if __name__ == '__main__':
     parser.add_argument('--cycle_mode', type=str, default='q', help='ablation of cycle ')
     
     args = parser.parse_args()
+    if args.des == "test":
+        args.des = datetime.now().strftime("%Y%m%d_%H%M%S")
     args.stride = args.patch_len
     args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
 
@@ -99,7 +102,7 @@ if __name__ == '__main__':
         for ii in range(args.itr):
             # setting record of experiments
             exp = Exp(args)  # set experiments
-            setting = '{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_d{}_ld{}_lr{}_{}_{}'.format(
+            setting = '{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_d{}_ld{}_lr{}_cm{}_{}_{}'.format(
                 args.model_id,
                 args.model,
                 args.data,
@@ -113,6 +116,7 @@ if __name__ == '__main__':
                 args.dropout,
                 args.layer_dropout,
                 args.learning_rate,
+                args.cycle_mode,
                 args.des, ii)
 
             print('>>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>'.format(setting))
@@ -123,7 +127,7 @@ if __name__ == '__main__':
             torch.cuda.empty_cache()
     else:
         ii = 0
-        setting = '{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_d{}_ld{}_lr{}_{}_{}'.format(
+        setting = '{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_d{}_ld{}_lr{}_cm{}_{}_{}'.format(
             args.model_id,
             args.model,
             args.data,
@@ -137,6 +141,7 @@ if __name__ == '__main__':
             args.dropout,
             args.layer_dropout,
             args.learning_rate,
+            args.cycle_mode,
             args.des, ii)
 
         exp = Exp(args)  # set experiments
