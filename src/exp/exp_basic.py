@@ -15,6 +15,7 @@ from src.models import (
     TimeXer,
     TimeMixer,
     CycleNet,
+    DQNet2,
 )
 
 
@@ -32,6 +33,7 @@ class Exp_Basic(object):
             'DPQ': DPQ,
             'TQNet': TQNet,
             'DQNet': DQNet,
+            'DQNet2': DQNet2,
             'ModernTCN': ModernTCN,
             'TimeXer': TimeXer,
             'TimeMixer': TimeMixer,
