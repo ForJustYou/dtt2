@@ -56,7 +56,8 @@ class Model(nn.Module):
                                 window_size=configs.kernel, 
                                 patch_len=configs.patch_len, 
                                 stride=configs.stride,
-                                cycle=configs.cycle
+                                cycle=configs.cycle,
+                                cycle_mode=configs.cycle_mode
                                 ) for l in range(configs.e_layers)
             ],
             norm_layer=Layernorm(configs.d_model)
