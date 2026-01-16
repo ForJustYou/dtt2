@@ -80,7 +80,6 @@ if __name__ == '__main__':
     parser.add_argument('--n_reshape', type=int, default=16)
 
     # DQNet parameters
-    parser.add_argument('--pretreatment', type=int, default=0, help='pretreatment')
     parser.add_argument('--cycle', type=int, default=168, help='cycle length ')
     parser.add_argument('--cycle_mode', type=str, default='q', help='ablation of cycle ')
     

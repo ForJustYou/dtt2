@@ -1,61 +1,12 @@
 import math
-from typing import Optional
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-
-# -----------------------------
-# ReVIN
-# -----------------------------
-class RevIN(nn.Module):
-    """
-    Reversible Instance Normalization for time series.
-    x: (B, L, C)
-    normalize over L dimension per (B, C).
-    """
-    def __init__(self, num_features: int, eps: float = 1e-5, affine: bool = True):
-        super().__init__()
-        self.num_features = num_features
-        self.eps = eps
-        self.affine = affine
-        if affine:
-            self.gamma = nn.Parameter(torch.ones(1, 1, num_features))
-            self.beta = nn.Parameter(torch.zeros(1, 1, num_features))
-        else:
-            self.register_parameter("gamma", None)
-            self.register_parameter("beta", None)
-
-        self._cached_mean = None
-        self._cached_std = None
-
-    def forward(self, x: torch.Tensor, mode: str = "norm") -> torch.Tensor:
-        if mode == "norm":
-            # mean/std over time dimension L
-            mean = x.mean(dim=1, keepdim=True)  # (B, 1, C)
-            var = x.var(dim=1, keepdim=True, unbiased=False)
-            std = torch.sqrt(var + self.eps)
-
-            self._cached_mean = mean
-            self._cached_std = std
-
-            x_norm = (x - mean) / std
-            if self.affine:
-                x_norm = x_norm * self.gamma + self.beta
-            return x_norm
-
-        elif mode == "denorm":
-            if self._cached_mean is None or self._cached_std is None:
-                raise RuntimeError("RevIN: denorm called before norm.")
-            x_den = x
-            if self.affine:
-                x_den = (x_den - self.beta) / (self.gamma + self.eps)
-            x_den = x_den * self._cached_std + self._cached_mean
-            return x_den
-        else:
-            raise ValueError(f"RevIN mode must be 'norm' or 'denorm', got {mode}.")
-
+from einops import rearrange
+from timm.models.layers import trunc_normal_
+from src.layers.MLP import MLP
+from src.utils.functions import num_patches
+import numpy as np
 
 # -----------------------------
 # Embeddings (PV-friendly)
@@ -83,7 +34,6 @@ class TokenEmbedding(nn.Module):
         x = x.transpose(1, 2)
         return x
 
-
 class PositionalEmbedding(nn.Module):
     """
     Sinusoidal positional embedding.
@@ -100,7 +50,6 @@ class PositionalEmbedding(nn.Module):
     def forward(self, length: int) -> torch.Tensor:
         # (1, L, d_model)
         return self.pe[:length].unsqueeze(0)
-
 
 class PVEmbedding(nn.Module):
     """
@@ -126,399 +75,378 @@ class PVEmbedding(nn.Module):
         if self.pos is not None:
             out = out + self.pos(out.size(1))
         return self.drop(out)
-
-
-# -----------------------------
-# Phase Query (Q replaced by periodic phase matrix)
-# -----------------------------
-class PhaseQueryGenerator(nn.Module):
+    
+class DropPath(nn.Module):
+    """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
     """
-    Generate Q from cycle phase, chosen by cycle_index.
+    def __init__(self, drop_prob=None):
+        super(DropPath, self).__init__()
+        self.drop_prob = drop_prob
 
-    We generate a deterministic sinusoidal phase embedding:
-        phase = 2π * (pos / period) + 2π * (cycle_index / period)
-    then map [sin(phase), cos(phase), sin(2*phase), cos(2*phase), ...] into d_model.
-
-    cycle_index: int tensor of shape (B,) or scalar int
-    """
-    def __init__(
-        self,
-        d_model: int,
-        period: int,
-        max_len: int,
-        harmonics: int = 4,   # number of harmonics used
-    ):
+    def forward(self, x):
+        if self.drop_prob == 0. or not self.training:
+            return x
+        keep_prob = 1 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)  
+        random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
+        random_tensor.floor_()  # binarize
+        output = x.div(keep_prob) * random_tensor
+        return output
+    
+class DeformAtten1D(nn.Module):
+    '''
+        max_offset (int): The maximum magnitude of the offset residue. Default: 14.
+    '''
+    def __init__(self, seq_len, d_model, n_heads, dropout, kernel=5, n_groups=4) -> None:
         super().__init__()
-        self.d_model = d_model
-        self.period = period
-        self.max_len = max_len
-        self.harmonics = harmonics
-
-        # phase feature dim = 2 * harmonics
-        feat_dim = 2 * harmonics
-        self.proj = nn.Linear(feat_dim, d_model, bias=True)
-
-        # pre-store positions [0..max_len-1]
-        self.register_buffer("pos_idx", torch.arange(max_len, dtype=torch.float), persistent=False)
-
-    def forward(self, cycle_index: torch.Tensor, length: int, start_pos: int = 0) -> torch.Tensor:
-        """
-        Returns Q: (B, length, d_model)
-        """
-        if length + start_pos > self.max_len:
-            raise ValueError(f"length({length})+start_pos({start_pos}) exceeds max_len({self.max_len})")
-
-        # cycle_index -> (B, 1)
-        if not torch.is_tensor(cycle_index):
-            cycle_index = torch.tensor(cycle_index, dtype=torch.long, device=self.pos_idx.device)
-
-        if cycle_index.dim() == 0:
-            cycle_index = cycle_index.view(1)
-        if cycle_index.dim() == 1:
-            cycle_index = cycle_index.view(-1, 1)  # (B, 1)
-        else:
-            raise ValueError("cycle_index must be scalar or shape (B,)")
-
-        B = cycle_index.size(0)
-
-        # positions: (1, L)
-        pos = self.pos_idx[start_pos:start_pos + length].view(1, -1)  # (1, L)
-
-        # phase: (B, L)
-        # convert cycle_index to phase offset
-        cycle_offset = (cycle_index.float() % self.period) / float(self.period)  # (B,1) in [0,1)
-        phase = 2.0 * math.pi * (pos / float(self.period) + cycle_offset)  # (B, L)
-
-        # build harmonic features: (B, L, 2*H)
-        feats = []
-        for k in range(1, self.harmonics + 1):
-            feats.append(torch.sin(k * phase))
-            feats.append(torch.cos(k * phase))
-        feat = torch.stack(feats, dim=-1)  # (B, L, 2H)
-
-        q = self.proj(feat)  # (B, L, d_model)
-        return q
-
-
-# -----------------------------
-# 1D Deformable Attention (Self/Cross)
-# -----------------------------
-def _linear_interpolate_1d(values: torch.Tensor, idx_float: torch.Tensor) -> torch.Tensor:
-    """
-    values: (B, H, L, D)
-    idx_float: (B, H, L, P) positions in [0, L-1] (float)
-    returns: (B, H, L, P, D) interpolated
-    """
-    B, H, L, D = values.shape
-    P = idx_float.size(-1)
-
-    idx0 = torch.floor(idx_float).clamp(0, L - 1).long()  # (B,H,L,P)
-    idx1 = (idx0 + 1).clamp(0, L - 1)                     # (B,H,L,P)
-    w1 = (idx_float - idx0.float()).unsqueeze(-1)         # (B,H,L,P,1)
-    w0 = 1.0 - w1                                         # (B,H,L,P,1)
-
-    # gather along L dimension
-    # expand to gather D
-    gather0 = values.gather(dim=2, index=idx0.unsqueeze(-1).expand(B, H, L, P, D))
-    gather1 = values.gather(dim=2, index=idx1.unsqueeze(-1).expand(B, H, L, P, D))
-
-    out = w0 * gather0 + w1 * gather1
-    return out
-
-
-class DeformableAttention1D(nn.Module):
-    """
-    Deformable attention in 1D.
-    - For self-attn: query_len = key_len = L
-    - For cross-attn: query_len = Lq, key_len = Lk
-
-    Q is external (here: phase query), K/V from x (embedding/memory).
-    """
-    def __init__(
-        self,
-        d_model: int,
-        n_heads: int,
-        num_points: int = 4,
-        dropout: float = 0.1,
-    ):
-        super().__init__()
-        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
-        self.d_model = d_model
+        self.offset_range_factor = kernel
+        self.seq_len = seq_len
+        self.d_model = d_model 
+        self.n_groups = n_groups
+        self.n_group_channels = self.d_model // self.n_groups
         self.n_heads = n_heads
-        self.head_dim = d_model // n_heads
-        self.num_points = num_points
+        self.n_head_channels = self.d_model // self.n_heads
+        self.n_group_heads = self.n_heads // self.n_groups
+        self.scale = self.n_head_channels ** -0.5
 
-        self.k_proj = nn.Linear(d_model, d_model)
-        self.v_proj = nn.Linear(d_model, d_model)
-        self.q_proj = nn.Linear(d_model, d_model)  # still project phase-Q for capacity
-
-        # offsets predicted from Q: (B,Lq, H*P)
-        self.offset_proj = nn.Linear(d_model, n_heads * num_points)
-
-        # attention weight logits over points: (B,Lq,H,P)
-        self.attn_w_proj = nn.Linear(d_model, n_heads * num_points)
-
-        self.out_proj = nn.Linear(d_model, d_model)
-        self.drop = nn.Dropout(dropout)
-
-    def forward(self, q_in: torch.Tensor, kv_in: torch.Tensor) -> torch.Tensor:
-        """
-        q_in:  (B, Lq, d_model) phase query
-        kv_in: (B, Lk, d_model) source (self: same as encoder states; cross: memory)
-
-        return: (B, Lq, d_model)
-        """
-        B, Lq, _ = q_in.shape
-        _, Lk, _ = kv_in.shape
-        H, D = self.n_heads, self.head_dim
-        P = self.num_points
-
-        q = self.q_proj(q_in)
-        k = self.k_proj(kv_in)
-        v = self.v_proj(kv_in)
-
-        # reshape to heads
-        q = q.view(B, Lq, H, D).transpose(1, 2)  # (B,H,Lq,D)
-        k = k.view(B, Lk, H, D).transpose(1, 2)  # (B,H,Lk,D)
-        v = v.view(B, Lk, H, D).transpose(1, 2)  # (B,H,Lk,D)
-
-        # offsets and point weights from original q_in (not head-split)
-        offsets = self.offset_proj(q_in).view(B, Lq, H, P).permute(0, 2, 1, 3)  # (B,H,Lq,P)
-        attn_logits = self.attn_w_proj(q_in).view(B, Lq, H, P).permute(0, 2, 1, 3)  # (B,H,Lq,P)
-
-        # base index: align query positions to key positions
-        # if Lq != Lk, map query index linearly into key index range
-        if Lq == Lk:
-            base = torch.arange(Lq, device=q_in.device, dtype=torch.float).view(1, 1, Lq, 1)  # (1,1,Lq,1)
-        else:
-            base = torch.linspace(0, Lk - 1, steps=Lq, device=q_in.device, dtype=torch.float).view(1, 1, Lq, 1)
-
-        # apply offsets (can be negative/positive), then clamp
-        idx = (base + offsets).clamp(0.0, float(Lk - 1))  # (B,H,Lq,P)
-
-        # sample K and V at idx
-        k_s = _linear_interpolate_1d(k, idx)  # (B,H,Lq,P,D)
-        v_s = _linear_interpolate_1d(v, idx)  # (B,H,Lq,P,D)
-
-        # point-wise attention: dot(q, k_s) + learned point logits
-        # q: (B,H,Lq,D) -> (B,H,Lq,1,D)
-        q_exp = q.unsqueeze(3)
-        dot = (q_exp * k_s).sum(dim=-1) / math.sqrt(D)  # (B,H,Lq,P)
-        scores = dot + attn_logits
-        weights = F.softmax(scores, dim=-1)  # (B,H,Lq,P)
-        weights = self.drop(weights)
-
-        # weighted sum of v_s
-        out = (weights.unsqueeze(-1) * v_s).sum(dim=3)  # (B,H,Lq,D)
-
-        # merge heads
-        out = out.transpose(1, 2).contiguous().view(B, Lq, H * D)  # (B,Lq,d_model)
-        out = self.out_proj(out)
-        return self.drop(out)
-
-
-# -----------------------------
-# Encoder / Decoder Blocks
-# -----------------------------
-class FeedForward(nn.Module):
-    def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1, activation: str = "gelu"):
-        super().__init__()
-        self.fc1 = nn.Linear(d_model, d_ff)
-        self.fc2 = nn.Linear(d_ff, d_model)
-        self.drop = nn.Dropout(dropout)
-        if activation == "relu":
-            self.act = nn.ReLU()
-        else:
-            self.act = nn.GELU()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.drop(self.fc2(self.drop(self.act(self.fc1(x)))))
-
-
-class DeformableEncoderLayer(nn.Module):
-    def __init__(
-        self,
-        d_model: int,
-        n_heads: int,
-        d_ff: int,
-        num_points: int = 4,
-        dropout: float = 0.1,
-    ):
-        super().__init__()
-        self.attn = DeformableAttention1D(d_model, n_heads, num_points=num_points, dropout=dropout)
-        self.ffn = FeedForward(d_model, d_ff, dropout=dropout)
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.drop = nn.Dropout(dropout)
-
-    def forward(self, x: torch.Tensor, q_phase: torch.Tensor) -> torch.Tensor:
-        # x: (B,L,d), q_phase: (B,L,d)
-        a = self.attn(q_phase, x)
-        x = self.norm1(x + self.drop(a))
-        f = self.ffn(x)
-        x = self.norm2(x + self.drop(f))
-        return x
-
-
-class DeformableDecoderLayer(nn.Module):
-    """
-    Future phase queries do deformable cross-attn to encoder memory.
-    """
-    def __init__(
-        self,
-        d_model: int,
-        n_heads: int,
-        d_ff: int,
-        num_points: int = 4,
-        dropout: float = 0.1,
-    ):
-        super().__init__()
-        self.cross = DeformableAttention1D(d_model, n_heads, num_points=num_points, dropout=dropout)
-        self.ffn = FeedForward(d_model, d_ff, dropout=dropout)
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.drop = nn.Dropout(dropout)
-
-    def forward(self, y: torch.Tensor, mem: torch.Tensor, q_phase_future: torch.Tensor) -> torch.Tensor:
-        # y: (B,Lp,d) current decoder state (initialized as q_phase_future or learnable)
-        # mem: (B,L,d)
-        a = self.cross(q_phase_future, mem)
-        y = self.norm1(y + self.drop(a))
-        f = self.ffn(y)
-        y = self.norm2(y + self.drop(f))
-        return y
-
-
-# -----------------------------
-# Full PV Forecasting Model
-# -----------------------------
-class Model(nn.Module):
-    """
-    Input:
-        x_enc: (B, L, C)
-        cycle_index: scalar or (B,)
-    Output:
-        y_pred: (B, pred_len, out_dim)
-    """
-    def __init__(
-        self,configs,
-        num_points: int = 4,  # deformable attn sampling points nums
-        use_pos_emb: bool = True,
-        revin_affine: bool = True,
-        revin_eps: float = 1e-5,
-        harmonics: int = 4,   # phase Q harmonics
-        use_learnable_future_base: bool = True,  # decoder 额外可学习基底，提高表达
-    ):
-        super().__init__()
-        self.c_in = configs.enc_in
-        self.out_dim = configs.c_out
-        self.max_len = configs.seq_len + configs.pred_len
-        self.pred_len = configs.pred_len
-        self.d_model = configs.d_model
-        self.period = configs.period
-        self.d_layers = configs.d_layers
-        self.e_layers = configs.e_layers
-        self.n_heads = configs.n_heads
-        self.d_ff = configs.d_model * 4
-        self.dropout = configs.dropout
-        self.kernel_size = configs.kernel
-        # ReVIN on raw input channels
-        self.revin = RevIN(num_features=self.c_in, eps=revin_eps, affine=revin_affine)
-
-        # Embedding
-        self.embed = PVEmbedding(
-            c_in=self.c_in,
-            d_model=self.d_model,
-            max_len=self.max_len,
-            dropout=self.dropout,
-            conv_kernel=self.kernel_size,
-            use_pos_emb=use_pos_emb,
+        self.proj_q = nn.Conv1d(self.d_model, self.d_model, kernel_size=1, stride=1, padding=0)
+        self.proj_k = nn.Conv1d(self.d_model, self.d_model, kernel_size=1, stride=1, padding=0)
+        self.proj_v = nn.Conv1d(self.d_model, self.d_model, kernel_size=1, stride=1, padding=0)
+        self.proj_out = nn.Linear(self.d_model, self.d_model)
+        kernel_size = kernel
+        self.stride = 1
+        pad_size = kernel_size // 2 if kernel_size != self.stride else 0
+        self.proj_offset = nn.Sequential(
+            nn.Conv1d(self.n_group_channels, self.n_group_channels, kernel_size=kernel_size, stride=self.stride, padding=pad_size),
+            nn.Conv1d(self.n_group_channels, 1, kernel_size=1, stride=self.stride, padding=pad_size),
         )
 
-        # Phase Q generators (encoder / decoder)
-        self.phase_q = PhaseQueryGenerator(d_model=self.d_model, period=self.period, max_len=self.max_len, harmonics=harmonics)
+        self.scale_factor = self.d_model ** -0.5  # 1/np.sqrt(dim)
 
-        # Encoder
-        self.encoder = nn.ModuleList([
-            DeformableEncoderLayer(
-                d_model=self.d_model,
-                n_heads=self.n_heads,
-                d_ff=self.d_ff,
-                num_points=num_points,
-                dropout=self.dropout,
-            )
-            for _ in range(self.e_layers)
-        ])
-        self.enc_norm = nn.LayerNorm(self.d_model)
+        self.relative_position_bias_table = nn.Parameter(torch.zeros(1, self.d_model, self.seq_len))
+        trunc_normal_(self.relative_position_bias_table, std=.02)
 
-        # Decoder
-        self.decoder = nn.ModuleList([
-            DeformableDecoderLayer(
-                d_model=self.d_model,
-                n_heads=self.n_heads,
-                d_ff=self.d_ff,
-                num_points=num_points,
-                dropout=self.dropout,
-            )
-            for _ in range(self.d_layers)
-        ])
-        self.dec_norm = nn.LayerNorm(self.d_model)
+    def forward(self, x, mask=None,Q=None,K=None):
+        B, L, C = x.shape
+        dtype, device = x.dtype, x.device
+        x = x.permute(0,2,1) # B, C, L
 
-        # Optional learnable base for future tokens
-        self.use_learnable_future_base = use_learnable_future_base
-        if use_learnable_future_base:
-            self.future_base = nn.Parameter(torch.zeros(1, self.pred_len, self.d_model))
-            nn.init.trunc_normal_(self.future_base, std=0.02)
+        q = self.proj_q(x) if Q is None else self.proj_q(Q.permute(0,2,1)) # B, C, L
+
+        group = lambda t: rearrange(t, 'b (g d) n -> (b g) d n', g = self.n_groups)
+
+        grouped_queries = group(q)
+
+        offset = self.proj_offset(grouped_queries) # B * g 1 Lg
+        offset = rearrange(offset, 'b 1 n -> b n')
+
+        def grid_sample_1d(feats, grid, *args, **kwargs):
+            grid = rearrange(grid, '... -> ... 1 1')
+            grid = F.pad(grid, (1, 0), value = 0.)
+            feats = rearrange(feats, '... -> ... 1')
+            out = F.grid_sample(feats, grid, **kwargs) 
+            return rearrange(out, '... 1 -> ...')
+        
+        def normalize_grid(arange, dim = 1, out_dim = -1):
+            n = arange.shape[-1]
+            return 2.0 * arange / max(n - 1, 1) - 1.0
+
+        if self.offset_range_factor >= 0:
+            offset = offset.tanh().mul(self.offset_range_factor)
+
+        grid = torch.arange(offset.shape[-1], device = device)
+        vgrid = grid + offset
+        vgrid_scaled = normalize_grid(vgrid)
+        x_sampled = grid_sample_1d(group(x),vgrid_scaled,
+            mode = 'bilinear', padding_mode = 'zeros', align_corners = False)[:,:,:L]
+
+        x_sampled = rearrange(x_sampled,'(b g) d n -> b (g d) n', g = self.n_groups)
+        q = q.reshape(B * self.n_heads, self.n_head_channels, L)
+        k = self.proj_k(x_sampled).reshape(B * self.n_heads, self.n_head_channels, L)
+        if K is not None:
+            k = self.proj_k(K.permute(0,2,1)).reshape(B * self.n_heads, self.n_head_channels, L)
+        v = self.proj_v(x_sampled)
+        v = (v + self.relative_position_bias_table).reshape(B * self.n_heads, self.n_head_channels, L)
+
+        scaled_dot_prod = torch.einsum('b i d , b j d -> b i j', q, k) * self.scale_factor
+
+        if mask is not None:
+            assert mask.shape == scaled_dot_prod.shape[1:]
+            scaled_dot_prod = scaled_dot_prod.masked_fill(mask, -np.inf)
+
+        attention = torch.softmax(scaled_dot_prod, dim=-1) # softmax: attention[0,0,:].sum() = 1
+
+        out = torch.einsum('b i j , b j d -> b i d', attention, v) 
+        
+        return self.proj_out(rearrange(out, '(b g) l c -> b c (g l)', b=B))
+
+
+class DeformAtten2D(nn.Module):
+    '''
+        max_offset (int): The maximum magnitude of the offset residue. Default: 14.
+    '''
+    def __init__(self, patch_len, d_route, n_heads, kernel=5, n_groups=4, d_model=None,
+                 stride=1, seq_len=1) -> None:
+        super().__init__()
+        self.offset_range_factor = kernel
+        self.d_model = d_model
+        self.seq_len = seq_len
+        self.stride = stride
+        self.patch_len = patch_len
+        self.d_route = d_route #1
+        self.n_groups = n_groups
+        self.n_group_channels = self.d_route // self.n_groups
+        self.n_heads = n_heads
+        self.n_head_channels = self.d_route // self.n_heads
+        self.n_group_heads = self.n_heads // self.n_groups
+        self.scale = self.n_head_channels ** -0.5
+     
+        self.proj_q = nn.Conv2d(self.d_route, self.d_route, kernel_size=1, stride=1, padding=0)
+        self.proj_k = nn.Conv2d(self.d_route, self.d_route, kernel_size=1, stride=1, padding=0)
+        self.proj_v = nn.Conv2d(self.d_route, self.d_route, kernel_size=1, stride=1, padding=0)
+        self.proj_out = nn.Linear(self.d_route, self.d_route)
+        kernel_size = kernel
+        self.step = 1
+        pad_size = kernel_size // 2 if kernel_size != self.step else 0
+        self.proj_offset = nn.Sequential( 
+            nn.Conv2d(self.n_group_channels, self.n_group_channels, kernel_size=kernel_size, stride=self.step, padding=pad_size),
+            nn.Conv2d(self.n_group_channels, 2, kernel_size=1, stride=1, padding=0, bias=False)
+        )
+
+        self.scale_factor = self.d_route ** -0.5  # 1/np.sqrt(dim)
+        self.relative_position_bias_table = nn.Parameter(torch.zeros(1, self.d_route, self.patch_len, 1))
+        trunc_normal_(self.relative_position_bias_table, std=.02)
+
+
+    def forward(self, x,Q=None,K=None):
+        B, H, W, C = x.shape
+        x = x.permute(0, 3, 1, 2) # B, C, H, W
+        #416 1 7 64
+        q = self.proj_q(x) if Q is None else self.proj_q(Q.permute(0, 3, 1, 2))
+        offset = self.proj_offset(q) # B, 2, H, W
+
+        if self.offset_range_factor >= 0:
+            offset = offset.tanh().mul(self.offset_range_factor)
+
+        def create_grid_like(t, dim = 0):
+            h, w, device = *t.shape[-2:], t.device
+
+            grid = torch.stack(torch.meshgrid(
+                torch.arange(w, device = device),
+                torch.arange(h, device = device),
+            indexing = 'xy'), dim = dim)
+
+            grid.requires_grad = False
+            grid = grid.type_as(t)
+            return grid
+        
+        def normalize_grid(grid, dim = 1, out_dim = -1):
+            # normalizes a grid to range from -1 to 1
+            h, w = grid.shape[-2:]
+            grid_h, grid_w = grid.unbind(dim = dim)
+
+            grid_h = 2.0 * grid_h / max(h - 1, 1) - 1.0
+            grid_w = 2.0 * grid_w / max(w - 1, 1) - 1.0
+
+            return torch.stack((grid_h, grid_w), dim = out_dim)
+
+     
+        grid =create_grid_like(offset)
+        vgrid = grid + offset
+        vgrid_scaled = normalize_grid(vgrid)
+        x_sampled = F.grid_sample(x,vgrid_scaled,
+        mode = 'bilinear', padding_mode = 'zeros', align_corners = False)[:,:,:H,:W]
+        x_sampled = rearrange(x_sampled, '(b g) c h w -> b (g c) h w', g=self.n_groups)
+        k = self.proj_k(x_sampled).reshape(B * self.n_heads, H, W)
+        if K is not None:
+            k = self.proj_k(K.permute(0,3,1,2)).reshape(B * self.n_heads, H, W)
+        v = self.proj_v(x_sampled)
+        v = (v + self.relative_position_bias_table).reshape(B * self.n_heads, H, W)
+        q = q.reshape(B * self.n_heads, H, W) 
+        scaled_dot_prod = torch.einsum('b i d , b j d -> b i j', q, k) * self.scale_factor
+        attention = torch.softmax(scaled_dot_prod, dim=-1)
+        out = torch.einsum('b i j , b j d -> b i d', attention, v)
+        
+        return self.proj_out(out.reshape(B, H, W, C))
+
+
+class CrossDeformAttn(nn.Module):
+    def __init__(self, seq_len, d_model, n_heads, dropout, droprate,
+                 n_days=1, window_size=4, patch_len=7, stride=3) -> None:
+        super().__init__()
+        self.n_days = n_days
+        self.seq_len = seq_len
+        # 1d size: B*n_days, subseq_len, C
+        # 2d size: B*num_patches, 1, patch_len, C
+        self.subseq_len = seq_len // n_days + (1 if seq_len % n_days != 0 else 0)
+        self.patch_len = patch_len
+        self.stride = stride
+        self.num_patches = num_patches(self.seq_len, self.patch_len, self.stride)
+        self.layer_norm =  nn.LayerNorm(d_model)
+
+        # 1D
+        # Deform attention
+        self.deform_attn = DeformAtten1D(self.subseq_len, d_model, n_heads, dropout, kernel=window_size) 
+        self.attn_layers1d = nn.ModuleList([self.deform_attn])
+
+        self.mlps1d = nn.ModuleList([ MLP([d_model, d_model], final_relu=True, drop_out=0.0) for _ in range(len(self.attn_layers1d))])
+        self.drop_path1d = nn.ModuleList([ DropPath(droprate) if droprate > 0.0 else nn.Identity() for _ in range(len(self.attn_layers1d))])
+        #######################################
+        # 2D
+        d_route = 1
+        self.deform_attn2d = DeformAtten2D(
+            self.patch_len,
+            d_route,
+            n_heads=1,
+            kernel=window_size,
+            n_groups=1,
+            d_model=d_model,
+            seq_len=seq_len,
+            stride=stride
+        )
+        self.write_out = nn.Linear(self.num_patches*self.patch_len, self.seq_len)
+
+        self.attn_layers2d = nn.ModuleList([self.deform_attn2d])
+
+        self.mlps2d = nn.ModuleList([ MLP([d_model, d_model], final_relu=True, drop_out=0.0) for _ in range(len(self.attn_layers2d)) ])
+        self.drop_path2d = nn.ModuleList([DropPath(droprate) if droprate > 0.0 else nn.Identity() for _ in range(len(self.attn_layers2d)) ])
+
+        self.fc = nn.Linear(2*d_model, d_model)
+    
+    def forward(self, x, attn_mask=None, tau=None, delta=None,Q=None,K=None):
+        
+        def deform1d(x) -> torch.Tensor:
+            B, L, C = x.shape
+            x = self.layer_norm(x)
+            padding_len = (self.n_days - (L % self.n_days)) % self.n_days
+            x_padded = torch.cat((x, x[:, :padding_len, :].expand(-1, padding_len, -1)), dim=1)
+            x_1d = rearrange(x_padded, 'b (seg_num ts_d) d_model -> (b ts_d) seg_num d_model', ts_d=self.n_days) 
+            return x_1d
+        n_day = self.n_days 
+        B, L, C = x.shape
+        x_1d = deform1d(x)
+        Q_1d = deform1d(Q) if Q is not None else None
+        K_1d = deform1d(K) if K is not None else None
+        for d, attn_layer in enumerate(self.attn_layers1d):
+            x0 = x_1d
+            x_1d = attn_layer(x_1d, Q=Q_1d, K=K_1d)
+            x_1d = self.drop_path1d[d](x_1d) + x0
+            x0 = x_1d
+            x_1d = self.mlps1d[d](self.layer_norm(x_1d))
+            x_1d = self.drop_path1d[d](x_1d) + x0
+        x_1d = rearrange(x_1d, '(b ts_d) seg_num d_model -> b (seg_num ts_d) d_model', ts_d=n_day)[:,:L,:]
+
+        def deform2d(x) -> torch.Tensor:
+            x_unfold = x.unfold(dimension=-2, size=self.patch_len, step=self.stride)
+            x_2d = rearrange(x_unfold, 'b n c l -> (b n) l c').unsqueeze(-3)
+            x_2d = rearrange(x_2d, 'b c h w -> b h w c')
+            return x_2d
+        x_2d = deform2d(x)
+        Q_2d = deform2d(Q) if Q is not None else None
+        K_2d = deform2d(K) if K is not None else None
+        for d, attn_layer in enumerate(self.attn_layers2d):
+            x0 = x_2d
+            x_2d = attn_layer(x_2d,Q_2d,K_2d)
+            x_2d = self.drop_path2d[d](x_2d) + x0
+            x0 = x_2d
+            x_2d = self.mlps2d[d](self.layer_norm(x_2d.permute(0,1,3,2))).permute(0,1,3,2)
+            x_2d = self.drop_path2d[d](x_2d) + x0
+        x_2d = rearrange(x_2d, 'b h w c -> b c h w')
+        x_2d = rearrange(x_2d, '(b n) 1 l c -> b (n l) c', b=B)
+        x_2d = self.write_out(x_2d.permute(0,2,1)).permute(0,2,1)
+
+        x = torch.concat([x_1d, x_2d], dim=-1)
+        x = self.fc(x)
+        return x
+
+class Model(nn.Module):
+    def __init__(self,configs):
+        super().__init__()
+        self.seq_len = configs.seq_len
+        self.pred_len = configs.pred_len
+        self.e_layers = configs.e_layers
+        self.d_layers = configs.d_layers
+        self.d_model = configs.d_model
+        self.enc_in = configs.enc_in
+        self.c_out = configs.c_out
+        self.dropout = configs.dropout
+        self.kernel_size = configs.kernel
+        self.cycle_len = configs.cycle
+        self.cycle_mode = configs.cycle_mode
+        self.use_revin = True  # 是否使用RevIN，默认True 
+
+         # 周期性时间查询参数：(cycle_len, enc_in)，按周期索引提取
+        self.temporalQuery = torch.nn.Parameter(torch.zeros(self.cycle_len, self.enc_in), requires_grad=True)
+        
+        # 输入映射到隐藏维度
+        self.input_proj = nn.Linear(self.enc_in, self.d_model)
+
+        self.enc_embedding = PVEmbedding(
+            c_in=self.enc_in,
+            d_model=self.d_model,
+            max_len=self.seq_len,
+            dropout=self.dropout,
+            conv_kernel=3,
+            use_pos_emb=True,
+        )
+
+         # Deformable Attention
+
+        dpr = [x.item() for x in torch.linspace(self.dropout, self.dropout, self.e_layers)]
+        self.deform_attn = CrossDeformAttn(
+            seq_len=configs.seq_len,
+            d_model=self.d_model,
+            n_heads=configs.n_heads,
+            dropout=configs.dropout,
+            droprate=dpr[1],
+            n_days=configs.n_reshape,
+            window_size=configs.kernel,
+            patch_len=configs.patch_len,
+            stride=configs.stride
+        )
+
+        # 简单的前馈模块（两层 GELU）
+        self.model = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model),
+            nn.GELU(),
+            nn.Linear(self.d_model, self.d_model),
+            nn.GELU(),
+        )
+          # MLP layer
+        self.mlp = nn.Sequential(
+            nn.Linear(self.seq_len, self.d_model),
+            nn.LeakyReLU(),
+            nn.Linear(self.d_model, self.pred_len)
+        )
+        # 输出映射到预测长度
+        self.output_proj = nn.Linear(self.d_model, self.enc_in)
+
+    def forward(self, x_enc, x_mark_enc=None, x_dec=None, x_mark_dec=None, cycle_index=None) -> torch.Tensor:
+        cycle_index = cycle_index.long()
+
+        if self.use_revin:
+            seq_mean = torch.mean(x_enc, dim=1, keepdim=True)
+            seq_var = torch.var(x_enc, dim=1, keepdim=True) + 1e-5
+            x_enc = (x_enc - seq_mean) / torch.sqrt(seq_var)
+        
+        gather_index = (cycle_index.view(-1, 1) + torch.arange(self.seq_len, device=cycle_index.device).view(1, -1)) % self.cycle_len
+        query_input = self.temporalQuery[gather_index] 
+        x_enc = self.input_proj(x_enc) 
+        query_input = self.input_proj(query_input)  
+        if self.cycle_mode == 'q':
+            deform_out = self.deform_attn(x_enc, Q=query_input)
+        elif self.cycle_mode == 'qk':
+            deform_out = self.deform_attn(x_enc, Q=query_input, K=query_input)
         else:
-            self.register_parameter("future_base", None)
+            deform_out = self.deform_attn(x_enc)
+        x_enc = x_enc + deform_out
+        # 应用模型
+        hidden = self.model(x_enc)
 
-        # Output head
-        self.proj = nn.Linear(self.d_model, self.out_dim)
+        output = self.mlp(hidden + x_enc)
 
-    def forward(self, x_enc: torch.Tensor, cycle_index: torch.Tensor) -> torch.Tensor:
-        """
-        x_enc: (B, L, C)
-        cycle_index: scalar or (B,)
-        """
-        B, L, C = x_enc.shape
-        if L + self.pred_len > self.max_len:
-            raise ValueError(f"L({L}) + pred_len({self.pred_len}) > max_len({self.max_len})")
-
-        # 1) ReVIN normalize on raw channels
-        x_norm = self.revin(x_enc, mode="norm")  # (B,L,C)
-
-        # 2) Embedding
-        x = self.embed(x_norm)  # (B,L,d)
-
-        # 3) Encoder phase Q (same length L, start_pos=0)
-        q_phase_enc = self.phase_q(cycle_index=cycle_index, length=L, start_pos=0)  # (B,L,d)
-
-        # 4) Encoder: deformable self-attn with phase-Q
-        for layer in self.encoder:
-            x = layer(x, q_phase_enc)
-        mem = self.enc_norm(x)  # (B,L,d)
-
-        # 5) Decoder future phase Q (length pred_len, start_pos=L)
-        q_phase_dec = self.phase_q(cycle_index=cycle_index, length=self.pred_len, start_pos=L)  # (B,Lp,d)
-
-        # init decoder state
-        if self.use_learnable_future_base:
-            y = self.future_base.expand(B, -1, -1) + q_phase_dec
-        else:
-            y = q_phase_dec
-
-        # 6) Decoder: deformable cross-attn (future phase queries -> encoder mem)
-        for layer in self.decoder:
-            y = layer(y, mem, q_phase_dec)
-        y = self.dec_norm(y)  # (B,Lp,d)
-
-        # 7) Project to target
-        out = self.proj(y)  # (B, pred_len, out_dim)
-
-        # 8) ReVIN denorm:
-        #    ReVIN是对输入C维做的；如果 out_dim == C，可直接反归一化；
-        #    若 out_dim != C（例如只预测1维功率），这里默认你把目标功率放在输入的某一列，
-        #    建议：训练时让 out_dim == 1，并把目标列单独做ReVIN或把C=1输入模型。
-        if out.shape[-1] == C:
-            out = self.revin(out, mode="denorm")
-        return out
+        output = self.output_proj(output)
+        # 可选：实例反归一化（RevIN）
+        if self.use_revin:
+            output = output * torch.sqrt(seq_var) + seq_mean
+        return output[:, -self.pred_len:, :]
