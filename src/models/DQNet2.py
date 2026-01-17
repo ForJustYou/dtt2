@@ -8,74 +8,6 @@ from src.layers.MLP import MLP
 from src.utils.functions import num_patches
 import numpy as np
 
-# -----------------------------
-# Embeddings (PV-friendly)
-# -----------------------------
-class TokenEmbedding(nn.Module):
-    """
-    Conv1d token embedding (captures local ramps, cloud transients).
-    Input: (B, L, C) -> Output: (B, L, d_model)
-    """
-    def __init__(self, c_in: int, d_model: int, kernel_size: int = 3):
-        super().__init__()
-        padding = kernel_size // 2
-        self.conv = nn.Conv1d(
-            in_channels=c_in,
-            out_channels=d_model,
-            kernel_size=kernel_size,
-            padding=padding,
-            bias=True
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, L, C) -> (B, C, L) -> conv -> (B, d_model, L) -> (B, L, d_model)
-        x = x.transpose(1, 2)
-        x = self.conv(x)
-        x = x.transpose(1, 2)
-        return x
-
-class PositionalEmbedding(nn.Module):
-    """
-    Sinusoidal positional embedding.
-    """
-    def __init__(self, d_model: int, max_len: int):
-        super().__init__()
-        pe = torch.zeros(max_len, d_model)  # (max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float) * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer("pe", pe, persistent=False)
-
-    def forward(self, length: int) -> torch.Tensor:
-        # (1, L, d_model)
-        return self.pe[:length].unsqueeze(0)
-
-class PVEmbedding(nn.Module):
-    """
-    PV-friendly: TokenEmbedding (Conv) + PositionalEmbedding.
-    """
-    def __init__(
-        self,
-        c_in: int,
-        d_model: int,
-        max_len: int,
-        dropout: float = 0.1,
-        conv_kernel: int = 3,
-        use_pos_emb: bool = True,
-    ):
-        super().__init__()
-        self.token = TokenEmbedding(c_in, d_model, kernel_size=conv_kernel)
-        self.pos = PositionalEmbedding(d_model, max_len) if use_pos_emb else None
-        self.drop = nn.Dropout(dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, L, C)
-        out = self.token(x)
-        if self.pos is not None:
-            out = out + self.pos(out.size(1))
-        return self.drop(out)
-    
 class DropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
     """
@@ -270,7 +202,7 @@ class DeformAtten2D(nn.Module):
         return self.proj_out(out.reshape(B, H, W, C))
 
 
-class CrossDeformAttn(nn.Module):
+class DeformAttn(nn.Module):
     def __init__(self, seq_len, d_model, n_heads, dropout, droprate,
                  n_days=1, window_size=4, patch_len=7, stride=3) -> None:
         super().__init__()
@@ -357,8 +289,8 @@ class CrossDeformAttn(nn.Module):
 
         x = torch.concat([x_1d, x_2d], dim=-1)
         x = self.fc(x)
-        return x
-
+        return x_1d
+    
 class Model(nn.Module):
     def __init__(self,configs):
         super().__init__()
@@ -378,22 +310,16 @@ class Model(nn.Module):
          # 周期性时间查询参数：(cycle_len, enc_in)，按周期索引提取
         self.temporalQuery = torch.nn.Parameter(torch.zeros(self.cycle_len, self.enc_in), requires_grad=True)
         
-        # 输入映射到隐藏维度
-        self.input_proj = nn.Linear(self.enc_in, self.d_model)
+        #通道融合
+        self.channelAggregator = nn.MultiheadAttention(embed_dim=self.seq_len, num_heads=4, batch_first=True, dropout=0.5)
 
-        self.enc_embedding = PVEmbedding(
-            c_in=self.enc_in,
-            d_model=self.d_model,
-            max_len=self.seq_len,
-            dropout=self.dropout,
-            conv_kernel=3,
-            use_pos_emb=True,
-        )
+        # 输入映射到隐藏维度
+        self.input_proj = nn.Linear(self.seq_len, self.d_model)
 
          # Deformable Attention
 
         dpr = [x.item() for x in torch.linspace(self.dropout, self.dropout, self.e_layers)]
-        self.deform_attn = CrossDeformAttn(
+        self.deform_attn = DeformAttn(
             seq_len=configs.seq_len,
             d_model=self.d_model,
             n_heads=configs.n_heads,
@@ -405,6 +331,10 @@ class Model(nn.Module):
             stride=configs.stride
         )
 
+        self.deform_input = nn.Linear(self.enc_in, self.d_model)
+
+        self.deform_output = nn.Linear(self.d_model, self.enc_in)
+
         # 简单的前馈模块（两层 GELU）
         self.model = nn.Sequential(
             nn.Linear(self.d_model, self.d_model),
@@ -414,13 +344,16 @@ class Model(nn.Module):
         )
           # MLP layer
         self.mlp = nn.Sequential(
-            nn.Linear(self.seq_len, self.d_model),
+            nn.Dropout(self.dropout),
+            nn.Linear(self.d_model, self.d_model),
             nn.LeakyReLU(),
             nn.Linear(self.d_model, self.pred_len)
         )
         # 输出映射到预测长度
-        self.output_proj = nn.Linear(self.d_model, self.enc_in)
-
+        self.output_proj = nn.Sequential(
+            nn.Dropout(self.dropout),
+            nn.Linear(self.d_model, self.pred_len)
+        )
     def forward(self, x_enc, x_mark_enc=None, x_dec=None, x_mark_dec=None, cycle_index=None) -> torch.Tensor:
         cycle_index = cycle_index.long()
 
@@ -430,23 +363,31 @@ class Model(nn.Module):
             x_enc = (x_enc - seq_mean) / torch.sqrt(seq_var)
         
         gather_index = (cycle_index.view(-1, 1) + torch.arange(self.seq_len, device=cycle_index.device).view(1, -1)) % self.cycle_len
-        query_input = self.temporalQuery[gather_index] 
-        x_enc = self.input_proj(x_enc) 
-        query_input = self.input_proj(query_input)  
-        if self.cycle_mode == 'q':
-            deform_out = self.deform_attn(x_enc, Q=query_input)
-        elif self.cycle_mode == 'qk':
-            deform_out = self.deform_attn(x_enc, Q=query_input, K=query_input)
+        query_input = self.temporalQuery[gather_index].permute(0, 2, 1)  # (b, c, s)
+        # 通道融合
+        x_enc = x_enc.permute(0, 2, 1)  # (b, c, s)
+        channel = self.channelAggregator(query_input, x_enc, x_enc)[0]
+
+        if self.cycle_mode == 'None':
+            deform_out = self.deform_attn(self.deform_input(x_enc.permute(0, 2, 1)))
+        elif self.cycle_mode == 'q':
+            deform_out = self.deform_attn(self.deform_input(x_enc.permute(0, 2, 1)),
+                                      self.deform_input(query_input.permute(0, 2, 1)))
         else:
-            deform_out = self.deform_attn(x_enc)
-        x_enc = x_enc + deform_out
+            deform_out = self.deform_attn(self.deform_input(x_enc.permute(0, 2, 1)),
+                                        self.deform_input(query_input.permute(0, 2, 1)),
+                                      self.deform_input(query_input.permute(0, 2, 1)))
+                                      
+        deform_out = self.deform_output(deform_out).permute(0, 2, 1)
+        x_enc = x_enc + channel + deform_out
         # 应用模型
+        x_enc = self.input_proj(x_enc)
         hidden = self.model(x_enc)
 
-        output = self.mlp(hidden + x_enc)
+        output = hidden + x_enc
 
-        output = self.output_proj(output)
+        output = self.mlp(output).permute(0, 2, 1)
         # 可选：实例反归一化（RevIN）
         if self.use_revin:
             output = output * torch.sqrt(seq_var) + seq_mean
-        return output[:, -self.pred_len:, :]
+        return output

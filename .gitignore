@@ -28,6 +28,7 @@ checkpoints/
 .pytest_cache/
 .cache/
 results/
+results_pred1/
 *.npy
 result.txt
 

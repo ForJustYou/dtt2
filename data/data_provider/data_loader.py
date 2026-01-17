@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 from torch.utils.data import Dataset
 from sklearn.preprocessing import StandardScaler
-from data.data_provider import data_pretreat
 from src.utils.timefeatures import time_features
 import warnings
 import torch
@@ -30,7 +29,7 @@ class Dataset_SHEERM(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='MS', data_path='SHEERM.csv',
                  target='Net Load', scale=True, timeenc=0, freq='15min', 
-                 seasonal_patterns=None, pretreatment=False, cycle=None):
+                 seasonal_patterns=None,cycle=None):
         assert not size ==  None
         assert flag in ['train', 'test', 'val']
         type_map = {'train': 0, 'val': 1, 'test': 2}
@@ -44,7 +43,6 @@ class Dataset_SHEERM(Dataset):
         self.scale = scale
         self.timeenc = timeenc
         self.freq = freq
-        self.pretreatment = pretreatment
         self.root_path = root_path
         self.data_path = data_path
         self.__read_data__()
@@ -57,10 +55,7 @@ class Dataset_SHEERM(Dataset):
         cols.remove(self.target)
         cols.remove('Timestamp')
         df_raw = df_raw[['Timestamp'] + cols + [self.target]]
-        #变换顺序
-        if self.pretreatment == 1:
-           df_raw = data_pretreat.reorder_features(df_raw)
-      
+ 
         num_train = int(len(df_raw) * 0.7)
         num_test = int(len(df_raw) * 0.2)
         num_vali = len(df_raw) - num_train - num_test
@@ -126,7 +121,7 @@ class Dataset_PSHE(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='MS', data_path='PSHE.csv',
                  target='NetLoad', scale=True, timeenc=0, freq='30min',
-                 seasonal_patterns=None, pretreatment=False, cycle=168):
+                 seasonal_patterns=None, cycle=168):
         assert not size ==  None
         assert flag in ['train', 'test', 'val']
         type_map = {'train': 0, 'val': 1, 'test': 2}
@@ -218,7 +213,7 @@ class Dataset_CityLearn(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='MS', data_path='SHEERM.csv',
                  target='Net Load', scale=True, timeenc=0, freq='15min', 
-                 seasonal_patterns=None, pretreatment=False, cycle=168):
+                 seasonal_patterns=None, cycle=168):
         assert not size ==  None
         assert flag in ['train', 'test', 'val']
         type_map = {'train': 0, 'val': 1, 'test': 2}
@@ -232,7 +227,6 @@ class Dataset_CityLearn(Dataset):
         self.scale = scale
         self.timeenc = timeenc
         self.freq = freq
-        self.pretreatment = pretreatment
         self.root_path = root_path
         self.data_path = data_path
         self.__read_data__()
@@ -245,9 +239,7 @@ class Dataset_CityLearn(Dataset):
         cols.remove(self.target)
         cols.remove('Timestamp')
         df_raw = df_raw[['Timestamp'] + cols + [self.target]]
-        #变换顺序
-        if self.pretreatment == 1:
-           df_raw = data_pretreat.reorder_features(df_raw)
+
       
         num_train = int(len(df_raw) * 0.7)
         num_test = int(len(df_raw) * 0.2)
@@ -314,7 +306,7 @@ class Dataset_Estonian(Dataset):
     def __init__(self, root_path, flag='train', size=None,
                  features='MS', data_path='Estonian.csv',
                  target='NetLoad', scale=True, timeenc=0, freq='h',
-                 seasonal_patterns=None, pretreatment=False, cycle=168):
+                 seasonal_patterns=None, cycle=168):
         assert not size ==  None
         assert flag in ['train', 'test', 'val']
         type_map = {'train': 0, 'val': 1, 'test': 2}
@@ -328,7 +320,6 @@ class Dataset_Estonian(Dataset):
         self.scale = scale
         self.timeenc = timeenc
         self.freq = freq
-        self.pretreatment = pretreatment
         self.root_path = root_path
         self.data_path = data_path
         self.__read_data__()
@@ -341,9 +332,7 @@ class Dataset_Estonian(Dataset):
         cols.remove(self.target)
         cols.remove('Time')
         df_raw = df_raw[['Time'] + cols + [self.target]]
-        if self.pretreatment == 1:
-            df_raw = data_pretreat.reorder_features(df_raw)
-      
+
         num_train = int(len(df_raw) * 0.7)
         num_test = int(len(df_raw) * 0.2)
         num_vali = len(df_raw) - num_train - num_test
